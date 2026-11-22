@@ -6,6 +6,7 @@
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
 #include "fast/renderer3ds/pica_framebuffer_encode_gpu.h"
 #include "fast/renderer3ds/pica_texture_copy_plan.h"
+#include "fast/renderer3ds/pica_texture_copy_derive_gpu.h"
 #include "fast/renderer/spirv_cache.h"
 #include <algorithm>
 #include <chrono>
@@ -299,16 +300,16 @@ bool GfxRenderingAPIVulkan::BuildGpuTextureCopyDerivation(
 }
 
 bool GfxRenderingAPIVulkan::RecordGpuTextureCopyBaseFill(
-    const GpuTextureCopyDerivation& derivation, VkImage baseImage,
+    const GpuTextureCopyDerivation& derivation, const TextureRecord& base,
     TextureRecord& record) {
-    if (baseImage == VK_NULL_HANDLE || record.Image == VK_NULL_HANDLE ||
+    if (base.Image == VK_NULL_HANDLE || record.Image == VK_NULL_HANDLE ||
         derivation.DeclaredWidth == 0U || derivation.DeclaredHeight == 0U) {
         return false;
     }
     Extension::NriPicaDisplayCopyRegionDesc desc;
     desc.FrameIndex = mCurrentFrame;
     desc.FrameId = mFrameCounter;
-    desc.SourceImage = baseImage;
+    desc.SourceImage = base.Image;
     desc.SourceFormat = VK_FORMAT_R8G8B8A8_UNORM;
     // The base is the decoded native layout, so its own extent is the space the
     // expansion samples from.
@@ -332,7 +333,7 @@ bool GfxRenderingAPIVulkan::RecordGpuTextureCopyBaseFill(
     // RGBA8 pass-through: the base is already the decoded native pixel, so no
     // native format semantics may be applied a second time.
     desc.NativeFormat = 0U;
-    if (!mNriPicaTextureCopyDerivePass.ExecuteRegion(desc)) {
+    if (!RecordCopyRegion(desc, base.View, record.View)) {
         throw std::runtime_error(
             "raw PICA copy base fill dispatch was refused");
     }
@@ -392,7 +393,7 @@ bool GfxRenderingAPIVulkan::RecordGpuTextureCopyDerivation(
             desc.SourceNativeWidth = surface.SourceWidth;
             desc.SourceNativeHeight = surface.SourceHeight;
             desc.NativeFormat = surface.SourceFormat;
-            if (!mNriPicaTextureCopyDerivePass.ExecuteRegion(desc)) {
+            if (!RecordCopyRegion(desc, surface.ImageView, record.View)) {
                 throw std::runtime_error(
                     "raw PICA copy derivation dispatch was refused");
             }
@@ -1006,6 +1007,157 @@ bool GfxRenderingAPIVulkan::EnsureRawCopySampler(std::string* error) {
     return true;
 }
 
+void GfxRenderingAPIVulkan::InitializeVulkanCopyDerivation() {
+    try {
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &count, families.data());
+        if (mGraphicsQueueFamily >= count ||
+            !(families[mGraphicsQueueFamily].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+            throw std::runtime_error("graphics queue does not support compute");
+        }
+        if (!EnsureRawCopySampler(nullptr)) {
+            throw std::runtime_error("PICA copy sampler unavailable");
+        }
+
+        constexpr VkDescriptorSetLayoutBinding bindings[] = {
+            {0U, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1U, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            {1U, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1U, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            {2U, VK_DESCRIPTOR_TYPE_SAMPLER, 1U, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        };
+        VkDescriptorSetLayoutCreateInfo descriptor{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        descriptor.bindingCount = std::size(bindings);
+        descriptor.pBindings = bindings;
+        RequireCopyVk(vkCreateDescriptorSetLayout(mDevice, &descriptor, nullptr,
+                                                  &mVulkanCopyDeriveDescriptorLayout),
+                      "create Vulkan PICA copy descriptors");
+        const VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0U, 64U};
+        VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layout.setLayoutCount = 1U;
+        layout.pSetLayouts = &mVulkanCopyDeriveDescriptorLayout;
+        layout.pushConstantRangeCount = 1U;
+        layout.pPushConstantRanges = &range;
+        RequireCopyVk(vkCreatePipelineLayout(mDevice, &layout, nullptr, &mVulkanCopyDerivePipelineLayout),
+                      "create Vulkan PICA copy layout");
+
+        const std::string source(Renderer3ds::PicaTextureCopyDeriveComputeSource);
+        const auto spirv = mCompiledShaderCache.Resolve(source, Renderer::SpirvStage::Compute, [&] {
+            return Renderer::CompileShadercSpirv(source, Renderer::SpirvStage::Compute,
+                                                 "oot3d_pica_texture_copy_derive.comp");
+        });
+        const VkShaderModule module = CreateShaderModuleFromSpirv(spirv);
+        if (module == VK_NULL_HANDLE) {
+            throw std::runtime_error("Vulkan PICA copy shader module unavailable");
+        }
+        VkComputePipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        pipeline.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipeline.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        pipeline.stage.module = module;
+        pipeline.stage.pName = "main";
+        pipeline.layout = mVulkanCopyDerivePipelineLayout;
+        const VkResult status = vkCreateComputePipelines(mDevice, mPipelineCache, 1U, &pipeline,
+                                                         nullptr, &mVulkanCopyDerivePipeline);
+        vkDestroyShaderModule(mDevice, module, nullptr);
+        RequireCopyVk(status, "create Vulkan PICA copy pipeline");
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "TRIAEVUM_VULKAN_PICA_COPY_UNAVAILABLE %s\n", error.what());
+        DestroyVulkanCopyDerivation();
+    }
+}
+
+void GfxRenderingAPIVulkan::DestroyVulkanCopyDerivation() {
+    vkDestroyPipeline(mDevice, mVulkanCopyDerivePipeline, nullptr);
+    vkDestroyPipelineLayout(mDevice, mVulkanCopyDerivePipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(mDevice, mVulkanCopyDeriveDescriptorLayout, nullptr);
+    mVulkanCopyDerivePipeline = VK_NULL_HANDLE;
+    mVulkanCopyDerivePipelineLayout = VK_NULL_HANDLE;
+    mVulkanCopyDeriveDescriptorLayout = VK_NULL_HANDLE;
+}
+
+bool GfxRenderingAPIVulkan::RecordCopyRegion(
+    const Extension::NriPicaDisplayCopyRegionDesc& desc,
+    VkImageView sourceView, VkImageView destinationView) {
+    if (mNriPicaTextureCopyDerivePass.Available()) {
+        return mNriPicaTextureCopyDerivePass.ExecuteRegion(desc);
+    }
+    if (mVulkanCopyDerivePipeline == VK_NULL_HANDLE ||
+        sourceView == VK_NULL_HANDLE || destinationView == VK_NULL_HANDLE ||
+        !Extension::ValidateNriPicaDisplayCopyRegionDesc(desc)) {
+        return false;
+    }
+    EndNativePicaRenderPass();
+    const auto command = mCommandBuffers[mCurrentFrame];
+    if (mRenderPassActive) {
+        vkCmdEndRenderPass(command);
+        mRenderPassActive = false;
+        mOverlayRenderPassActive = false;
+    }
+
+    VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocation.descriptorPool = mFrameResources[mCurrentFrame].DescriptorPool;
+    allocation.descriptorSetCount = 1U;
+    allocation.pSetLayouts = &mVulkanCopyDeriveDescriptorLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    RequireCopyVk(vkAllocateDescriptorSets(mDevice, &allocation, &set), "allocate Vulkan PICA copy descriptors");
+    const VkDescriptorImageInfo images[] = {
+        {VK_NULL_HANDLE, sourceView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE, destinationView, VK_IMAGE_LAYOUT_GENERAL},
+        {mRawCopyEncodeSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED},
+    };
+    constexpr VkDescriptorType types[] = {
+        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER,
+    };
+    std::array<VkWriteDescriptorSet, std::size(types)> writes{};
+    for (uint32_t i = 0; i < writes.size(); ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1U;
+        writes[i].descriptorType = types[i];
+        writes[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(mDevice, writes.size(), writes.data(), 0U, nullptr);
+
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = desc.DestinationImage;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0U, 1U, 0U, 1U};
+    barrier.oldLayout = desc.DestinationInitialized
+        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcAccessMask = desc.DestinationInitialized ? VK_ACCESS_SHADER_WRITE_BIT : 0U;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+
+    // Matches the four vectors in PicaTextureCopyDeriveComputeSource.
+    const std::array<uint32_t, 16> push{
+        desc.DestinationX, desc.DestinationY, desc.Width, desc.Height,
+        static_cast<uint32_t>(desc.NativeDeltaX), static_cast<uint32_t>(desc.NativeDeltaY),
+        desc.SourceAttachmentRows ? 1U : 0U, 0U,
+        desc.DensityX, desc.DensityY, desc.SourceNativeWidth, desc.SourceNativeHeight,
+        desc.SourceWidth, desc.SourceHeight, desc.NativeFormat, 0U,
+    };
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, mVulkanCopyDerivePipeline);
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, mVulkanCopyDerivePipelineLayout,
+                            0U, 1U, &set, 0U, nullptr);
+    vkCmdPushConstants(command, mVulkanCopyDerivePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0U, sizeof(push), push.data());
+    vkCmdDispatch(command, 1U + (desc.Width - 1U) / 8U, 1U + (desc.Height - 1U) / 8U, 1U);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+    return true;
+}
+
 void GfxRenderingAPIVulkan::CaptureGpuTextureCopyVulkan(
     const GpuTextureCopySourceImport& source, GpuTextureCopySurface& surface) {
     VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -1019,28 +1171,43 @@ void GfxRenderingAPIVulkan::CaptureGpuTextureCopyVulkan(
     image.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
     image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    RequireCopyVk(vkCreateImage(mDevice, &image, nullptr, &surface.Image),
-                  "create Vulkan PICA copy capture");
-    try {
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(mDevice, surface.Image, &requirements);
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = FindMemoryType(
-            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        RequireCopyVk(vkAllocateMemory(mDevice, &allocation, nullptr, &surface.ImageMemory),
-                      "allocate Vulkan PICA copy capture");
-        RequireCopyVk(vkBindImageMemory(mDevice, surface.Image, surface.ImageMemory, 0),
-                      "bind Vulkan PICA copy capture");
-    } catch (...) {
-        vkDestroyImage(mDevice, surface.Image, nullptr);
-        if (surface.ImageMemory != VK_NULL_HANDLE) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto key = GpuCopyDerivedImageKey(source.Width, source.Height, /*nriOwned=*/false);
+    PooledGpuCopyImage pooled;
+    if (AcquireGpuCopyImage(key, pooled)) {
+        surface.Image = pooled.Image;
+        surface.ImageMemory = pooled.Memory;
+        surface.ImageView = pooled.View;
+    } else {
+        RequireCopyVk(vkCreateImage(mDevice, &image, nullptr, &surface.Image),
+                      "create Vulkan PICA copy capture");
+        try {
+            VkMemoryRequirements requirements{};
+            vkGetImageMemoryRequirements(mDevice, surface.Image, &requirements);
+            VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocation.allocationSize = requirements.size;
+            allocation.memoryTypeIndex = FindMemoryType(
+                requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            RequireCopyVk(vkAllocateMemory(mDevice, &allocation, nullptr, &surface.ImageMemory),
+                          "allocate Vulkan PICA copy capture");
+            RequireCopyVk(vkBindImageMemory(mDevice, surface.Image, surface.ImageMemory, 0),
+                          "bind Vulkan PICA copy capture");
+            VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            view.image = surface.Image;
+            view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view.format = source.Format;
+            view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0U, 1U, 0U, 1U};
+            RequireCopyVk(vkCreateImageView(mDevice, &view, nullptr, &surface.ImageView),
+                          "create Vulkan PICA copy view");
+        } catch (...) {
+            vkDestroyImage(mDevice, surface.Image, nullptr);
             vkFreeMemory(mDevice, surface.ImageMemory, nullptr);
+            throw;
         }
-        surface.Image = VK_NULL_HANDLE;
-        surface.ImageMemory = VK_NULL_HANDLE;
-        throw;
     }
+    surface.ImagePoolable = true;
+    mGpuTextureCopySamplerCost.PoolCreateSeconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     const auto command = mCommandBuffers[mCurrentFrame];
     std::array<VkImageMemoryBarrier, 2> barriers{};
@@ -1175,13 +1342,14 @@ void GfxRenderingAPIVulkan::MaterializeRestoredGpuTextureCopyProducers() {
         }
         surface.Image = staged.Image;
         surface.ImageMemory = staged.Memory;
+        surface.ImageView = staged.View;
         surface.ImagePoolable = false;  // restored image: not created by the capture path
         surface.Layout = staged.ImageLayout;
-        // The staged record only carried the upload; the register owns the
-        // image now, so its sampler and view go away.
+        // The register owns the image and view now. The staged sampler is no longer needed.
         staged.Image = VK_NULL_HANDLE;
         staged.NriImage = VK_NULL_HANDLE;
         staged.Memory = VK_NULL_HANDLE;
+        staged.View = VK_NULL_HANDLE;
         DestroyTexture(staged);
     }
 }
@@ -1259,9 +1427,17 @@ void GfxRenderingAPIVulkan::DestroyGpuTextureCopySurface(uint64_t identity, bool
     };
     if (found->second.Image != VK_NULL_HANDLE) {
         if (found->second.ImageMemory != VK_NULL_HANDLE) {
-            mNriPicaTextureCopyCapturePass.ForgetTexture(found->second.Image);
-            vkDestroyImage(mDevice, found->second.Image, nullptr);
-            vkFreeMemory(mDevice, found->second.ImageMemory, nullptr);
+            const auto& capture = found->second;
+            mNriPicaTextureCopyCapturePass.ForgetTexture(capture.Image);
+            mNriInterop.ForgetTexture(capture.Image);
+            if (toPool && capture.ImagePoolable) {
+                ReleaseGpuCopyImage(GpuCopyDerivedImageKey(capture.ImageWidth, capture.ImageHeight, false),
+                                    {capture.Image, capture.ImageView, capture.ImageMemory});
+            } else {
+                vkDestroyImageView(mDevice, capture.ImageView, nullptr);
+                vkDestroyImage(mDevice, capture.Image, nullptr);
+                vkFreeMemory(mDevice, capture.ImageMemory, nullptr);
+            }
         } else {
             retireCapture(found->second.Image, found->second.ImageView);
         }

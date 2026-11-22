@@ -425,7 +425,6 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         // Native-sized RGBA8 image holding the CPU-owned base of a derived
         // raw-copy sample, owned by this record and sampled only until the base
         // fill dispatch that expands it into the sampled image has executed.
-        VkImage BaseImage = VK_NULL_HANDLE;
         std::vector<uint64_t> CopyProducerIdentities;
         // The sampled content is a raw-copy production whose scene effects were
         // already resolved when it was captured, so a draw declared full-frame
@@ -1288,7 +1287,7 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     // Allocate (and view) a native PICA texture image without uploading.
     void CreateNativePicaTextureStorage(TextureRecord& texture, uint32_t width,
                                         uint32_t height, uint32_t mipLevels,
-                                        VkFormat format, bool storageView);
+                                        VkFormat format, bool storageView, bool allowNri = true);
     // A record that samples a raw copy: no CPU payload is uploaded, the image is
     // filled on the GPU by the copy's own passes.
     TextureRecord* CreateGpuCopiedTextureRecord(
@@ -1746,6 +1745,13 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     VkDescriptorSet mRawCopyEncodeDescriptorSet = VK_NULL_HANDLE;
     VkPipelineLayout mRawCopyEncodePipelineLayout = VK_NULL_HANDLE;
     VkPipeline mRawCopyEncodePipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout mVulkanCopyDeriveDescriptorLayout = VK_NULL_HANDLE;
+    VkPipelineLayout mVulkanCopyDerivePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline mVulkanCopyDerivePipeline = VK_NULL_HANDLE;
+    void InitializeVulkanCopyDerivation();
+    void DestroyVulkanCopyDerivation();
+    bool RecordCopyRegion(const Extension::NriPicaDisplayCopyRegionDesc& desc,
+                          VkImageView sourceView, VkImageView destinationView);
     bool mRawCopyEncodeVerify = false;
     uint64_t mRawCopyEncodeVerifyBytes = 0;
     uint64_t mRawCopyEncodeVerifyMismatches = 0;
@@ -1802,8 +1808,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         Fast::GpuCopyImagePoolKey key = GpuCopyCaptureImageKey(width, height);
         if (!nriOwned) {
             // CreateNativePicaTextureStorage's raw Vulkan fallback.
-            key.Usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                        VK_IMAGE_USAGE_STORAGE_BIT;
+            key.Usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
             key.Allocator = kGpuCopyImageAllocatorVulkan;
         }
         return key;
@@ -1887,7 +1893,7 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     // owned regions are overlaid. The base carries no native format semantics:
     // it is already the decoded RGBA8 the CPU path produced.
     bool RecordGpuTextureCopyBaseFill(const GpuTextureCopyDerivation& derivation,
-                                      VkImage baseImage,
+                                      const TextureRecord& base,
                                       TextureRecord& record);
     // Identity of the resolved producer set, stable across lookups and restores.
     [[nodiscard]] static uint64_t GpuTextureCopyReferenceIdentity(

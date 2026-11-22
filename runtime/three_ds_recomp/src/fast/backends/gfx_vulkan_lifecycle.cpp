@@ -400,8 +400,13 @@ void GfxRenderingAPIVulkan::Init() {
             mNriPicaTextureCopyCapturePass.UnavailableReason());
     }
     if (!mNriPicaTextureCopyDerivePass.Initialize(mNriInterop)) {
-        StartupCheckpointf("vulkan_pica_copy_compatibility %s",
-                           mNriPicaTextureCopyDerivePass.UnavailableReason().c_str());
+        InitializeVulkanCopyDerivation();
+        if (mVulkanCopyDerivePipeline != VK_NULL_HANDLE) {
+            StartupCheckpoint("vulkan_pica_copy_gpu");
+        } else {
+            StartupCheckpointf("vulkan_pica_copy_compatibility %s",
+                               mNriPicaTextureCopyDerivePass.UnavailableReason().c_str());
+        }
         SPDLOG_INFO(
             "OOT3D Vulkan NRI PICA raw-copy derivation unavailable: {}",
             mNriPicaTextureCopyDerivePass.UnavailableReason());
@@ -877,6 +882,7 @@ void GfxRenderingAPIVulkan::Shutdown() {
         }
         DestroyGpuTextureCopySurfaces();  // also releases the GPU-copy image pool
         ReleaseGpuCopySamplerCache();
+        DestroyVulkanCopyDerivation();
         DestroyRawCopyEncodeResources();
         if (mOot3dShadow2dRenderPass != VK_NULL_HANDLE) {
             vkDestroyRenderPass(mDevice, mOot3dShadow2dRenderPass, nullptr);

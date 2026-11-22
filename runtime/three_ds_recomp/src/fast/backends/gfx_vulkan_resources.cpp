@@ -92,11 +92,13 @@ void GfxRenderingAPIVulkan::CreateFrameResources() {
                                                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                          true);
-        const std::array<VkDescriptorPoolSize, 5> poolSizes = {
+        const std::array<VkDescriptorPoolSize, 7> poolSizes = {
             VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 9 },
             VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4096 },
             VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 7 },
             VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
+            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096 },
+            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_SAMPLER, 4096 },
             VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 },
         };
         VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -802,11 +804,6 @@ void GfxRenderingAPIVulkan::DestroyTexture(TextureRecord& texture) {
         if (!texture.ImageBorrowed && texture.Memory != VK_NULL_HANDLE) {
             vkFreeMemory(mDevice, texture.Memory, nullptr);
         }
-    }
-    if (texture.BaseImage != VK_NULL_HANDLE) {
-        // The native-sized base of a derived raw-copy sample is owned here.
-        mNriPicaTextureImageOwner.Destroy(texture.BaseImage);
-        texture.BaseImage = VK_NULL_HANDLE;
     }
     texture.Image = VK_NULL_HANDLE;
     texture.NriImage = VK_NULL_HANDLE;
