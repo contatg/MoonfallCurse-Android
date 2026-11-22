@@ -86,4 +86,10 @@
     <string name="hd_import">Importar .zip…</string>
     <string name="hd_ready">A interface HD já está ativa no jogo instalado.</string>
     <string name="hd_progress">%1$s de %2$s</string>
+    <string name="forge_gpu_driver">Driver da GPU</string>
+    <string name="forge_driver_system">Driver do sistema selecionado. Importe um ZIP confiável do Mesa Turnip para uma GPU Adreno compatível.</string>
+    <string name="forge_turnip_imported">Turnip importado. O jogo vai testar o driver na próxima abertura. Se o jogo falhar ao iniciar, volte aqui e selecione o driver do sistema.</string>
+    <string name="forge_turnip_import">Importar ZIP do Turnip</string>
+    <string name="forge_driver_use_system">Usar driver do sistema</string>
+    <string name="forge_turnip_failed">Não foi possível alterar o driver da GPU.</string>
 </resources>

@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -543,6 +544,9 @@ bool NriInteropContext::Initialize(VkInstance instance, VkPhysicalDevice physica
     queueFamily.familyIndex = graphicsQueueFamily;
 
     nri::DeviceCreationVKDesc desc{};
+#if defined(__ANDROID__)
+    desc.libraryPath = std::getenv("TRIAEVUM_ANDROID_TURNIP_LOADER");
+#endif
     nri::CallbackInterface callback{};
     if (validationTelemetry != nullptr) {
         callback.MessageCallback = Impl::ValidationMessage;

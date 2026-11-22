@@ -42,6 +42,7 @@ import android.widget.TextView
 import org.json.JSONObject
 import org.triaevum.android.R
 import org.triaevum.android.GameSession
+import org.triaevum.android.TurnipDriver
 import org.triaevum.android.diagnostics.DiagnosticsActivity
 import org.triaevum.android.diagnostics.StartupDiagnostics
 import org.triaevum.android.diagnostics.StartupReport
@@ -471,10 +472,58 @@ class InstallerActivity : Activity() {
         return true
     }
 
+    private var importingTurnip = false
+
+    private fun chooseGpuDriver() {
+        if (importingTurnip) return
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.forge_gpu_driver)
+            .setMessage(if (TurnipDriver.imported(this)) R.string.forge_turnip_imported
+                        else R.string.forge_driver_system)
+            .setPositiveButton(R.string.forge_turnip_import) { _, _ ->
+                val pick = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("application/zip")
+                startActivityForResult(pick, PICK_TURNIP)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+        if (TurnipDriver.imported(this)) {
+            dialog.setNeutralButton(R.string.forge_driver_use_system) { _, _ ->
+                if (TurnipDriver.useSystem(this)) showGpuDriverResult(R.string.forge_driver_system)
+                else showGpuDriverResult(R.string.forge_turnip_failed)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showGpuDriverResult(message: Int) {
+        if (!isFinishing && !isDestroyed) {
+            AlertDialog.Builder(this).setTitle(R.string.forge_gpu_driver).setMessage(message)
+                .setPositiveButton(android.R.string.ok, null).show()
+        }
+    }
+
     @Deprecated("Platform result API; the installer has no AndroidX dependency.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         val uri = data?.data
+        if (requestCode == PICK_TURNIP && resultCode == RESULT_OK && uri != null && !importingTurnip) {
+            importingTurnip = true
+            Thread({
+                val message = try {
+                    val input = contentResolver.openInputStream(uri) ?: error("No driver file")
+                    input.use { TurnipDriver.importZip(this, it) }
+                    R.string.forge_turnip_imported
+                } catch (error: Exception) {
+                    Log.w(TAG, "Cannot import Vulkan driver", error)
+                    R.string.forge_turnip_failed
+                }
+                runOnUiThread {
+                    importingTurnip = false
+                    showGpuDriverResult(message)
+                }
+            }, "turnip-import").start()
+            return
+        }
         if (requestCode == PICK_HD_PACK && resultCode == RESULT_OK && uri != null) {
             val pack = try {
                 contentResolver.openFileDescriptor(uri, "r")
@@ -1491,6 +1540,12 @@ class InstallerActivity : Activity() {
         secondaryActions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(more, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            if (TurnipDriver.available(context)) {
+                addView(styleButton(Button(context).apply {
+                    text = getString(R.string.forge_gpu_driver)
+                    setOnClickListener { chooseGpuDriver() }
+                }), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            }
             addView(styleButton(languageButton), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
                 .apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(8) })
         }
@@ -1566,6 +1621,7 @@ class InstallerActivity : Activity() {
         private const val PICK_ROM = 1
         private const val REQUEST_NOTIFICATIONS = 2
         private const val PICK_HD_PACK = 3
+        private const val PICK_TURNIP = 4
         private const val PREFERENCES = "installer"
         private const val KEY_NOTIFICATIONS_ASKED = "notifications_asked"
         private const val KEY_REFRESH_TRIED = "refresh_tried"

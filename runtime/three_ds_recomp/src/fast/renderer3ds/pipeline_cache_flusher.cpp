@@ -36,8 +36,14 @@ void PipelineCacheFlusher::Start(std::filesystem::path path, VulkanPipelineCache
 }
 
 void PipelineCacheFlusher::Notice(uint64_t createdTotal) {
-    const uint64_t previous = mCreatedTotal.exchange(createdTotal);
-    if (createdTotal != previous) mWake.notify_one();
+    // Notice is called every frame. Only take the wait mutex on a change,
+    // so the worker cannot miss a notification while it goes to sleep.
+    if (mCreatedTotal.load(std::memory_order_relaxed) == createdTotal) return;
+    {
+        std::lock_guard lock(mMutex);
+        mCreatedTotal.store(createdTotal, std::memory_order_relaxed);
+    }
+    mWake.notify_one();
 }
 
 void PipelineCacheFlusher::Stop() {
@@ -57,25 +63,28 @@ PipelineCacheFlusher::Statistics PipelineCacheFlusher::Stats() const {
 
 void PipelineCacheFlusher::Worker() {
     Renderer::LowerPreparationThreadPriority();
+    using Clock = std::chrono::steady_clock;
+    const auto interval = std::chrono::ceil<Clock::duration>(
+        std::chrono::duration<double>(mPolicy.MinimumIntervalSeconds));
+    const auto hasNewPipelines = [this] {
+        const uint64_t created = mCreatedTotal.load(std::memory_order_relaxed);
+        const uint64_t delta = created >= mFlushedTotal ? created - mFlushedTotal : created;
+        return delta > 0 && delta >= mPolicy.MinimumNewPipelines;
+    };
+    std::unique_lock lock(mMutex);
     for (;;) {
-        uint64_t created = 0;
-        {
-            std::unique_lock lock(mMutex);
-            // The interval may elapse without a new creation; poll each second.
-            mWake.wait_for(lock, std::chrono::seconds(1), [this] { return mStopping; });
-            if (mStopping) return;
-            created = mCreatedTotal.load();
-            const double elapsed =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - mLastFlush).count();
-            if (!PipelineCacheFlushDue(created - mFlushedTotal, elapsed, mPolicy)) continue;
-        }
-        const bool stored = FlushOnce(created);
-        std::lock_guard lock(mMutex);
-        mLastFlush = std::chrono::steady_clock::now();
-        // A failed or skipped flush is not retried for the same pipelines; the
-        // next creations try again after the interval.
+        // No timer is needed while the cache is warm and nobody creates pipelines.
+        mWake.wait(lock, [&] { return mStopping || hasNewPipelines(); });
+        if (mStopping) return;
+        if (mWake.wait_until(lock, mLastFlush + interval, [this] { return mStopping; })) return;
+        if (!hasNewPipelines()) continue;
+        const uint64_t created = mCreatedTotal.load(std::memory_order_relaxed);
+        lock.unlock();
+        FlushOnce(created);
+        lock.lock();
+        mLastFlush = Clock::now();
+        // Failed or skipped snapshots are retried only after more creations.
         mFlushedTotal = created;
-        (void)stored;
     }
 }
 

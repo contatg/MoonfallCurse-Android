@@ -535,3 +535,13 @@ Dependencies obtained through CMake, vcpkg or platform SDKs retain their own
 licenses. Release construction must generate a resolved dependency inventory
 and include all required notices. A dependency being downloadable at build
 time does not imply that its binaries may be redistributed.
+
+## Android Vulkan driver support
+
+Android builds with Turnip import support use
+[libadrenotools](https://github.com/bylaws/libadrenotools) at
+`8fae8ce254dfc1344527e05301e43f37dea2df80` and its pinned
+[liblinkernsbypass](https://github.com/bylaws/liblinkernsbypass) submodule
+at `aa3975893d83ef1bc84c321ec60c65fbf1287887`. Both use the
+[BSD 2-Clause license](ports/android/app/src/main/assets/notices/AdrenoTools-BSD-2-Clause.txt), copyright
+2021 Billy Laws. Turnip itself is supplied by the player.
