@@ -132,12 +132,14 @@ bool EnvironmentFlag(const char* name) {
 
 void Oot3dVulkanGpuProfiler::Initialize(
     VkPhysicalDevice physicalDevice, VkDevice device,
-    uint32_t queueFamily, bool enabled) {
+    uint32_t queueFamily, bool enabled, bool frameOnly) {
     Shutdown();
     // Either developer trace enables the timestamps by itself.
     const bool timeline = EnvironmentFlag("TRIAEVUM_GPU_TIMELINE");
-    if (!(enabled || timeline || EnvironmentFlag("TRIAEVUM_GPU_GAP_TRACE") || Extension::GrassStageProfileEnabled()) ||
-        physicalDevice == VK_NULL_HANDLE || device == VK_NULL_HANDLE) {
+    const bool detailed = enabled || timeline || EnvironmentFlag("TRIAEVUM_GPU_GAP_TRACE") ||
+        Extension::GrassStageProfileEnabled();
+    mFrameOnly = !detailed && frameOnly;
+    if ((!detailed && !mFrameOnly) || physicalDevice == VK_NULL_HANDLE || device == VK_NULL_HANDLE) {
         return;
     }
 
@@ -406,6 +408,7 @@ void Oot3dVulkanGpuProfiler::BeginScope(
     }
     if (mPool == VK_NULL_HANDLE || slot >= kFramesInFlight ||
         commandBuffer == VK_NULL_HANDLE ||
+        (mFrameOnly && scope != Extension::GpuProfileScope::Frame) ||
         !mFrames[slot].Plan.Begin(scope)) {
         return;
     }
@@ -422,6 +425,7 @@ void Oot3dVulkanGpuProfiler::EndScope(
     }
     if (mPool == VK_NULL_HANDLE || slot >= kFramesInFlight ||
         commandBuffer == VK_NULL_HANDLE ||
+        (mFrameOnly && scope != Extension::GpuProfileScope::Frame) ||
         !mFrames[slot].Plan.End(scope)) {
         return;
     }

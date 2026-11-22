@@ -611,7 +611,7 @@ GfxRenderingAPIVulkan::GetOrCreateNativePicaRenderTarget(
         : Extension::ResolveNativePicaRenderExtent(
               {key.Width, key.Height},
               NativeTopScreenOutputExtent(),
-              outputResolutionUi ? 1.0F : mInternalResolutionScale);
+              outputResolutionUi ? 1.0F : mInternalResolutionScale, mNativeMobileProfile);
     if (const auto found = targets.find(key);
         found != targets.end()) {
         mDiagnostics.RecordRenderResolution(mInternalResolutionScale, outputExtent.Width,

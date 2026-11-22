@@ -835,7 +835,7 @@ void GfxRenderingAPIVulkan::StartFrame() {
             const auto expected = Extension::ResolveNativePicaRenderExtent(
                 {key.Width, key.Height},
                 NativeTopScreenOutputExtent(),
-                mInternalResolutionScale);
+                mInternalResolutionScale, mNativeMobileProfile);
             return target.Width != expected.Width || target.Height != expected.Height;
         });
     if (staleTargetExtent) {
@@ -952,6 +952,15 @@ void GfxRenderingAPIVulkan::StartFrame() {
         mFrameCounter > kFramesInFlight) {
         if (timings)
             mDiagnostics.SetGpuTimings(mFrameCounter - kFramesInFlight, *timings);
+        if (mNativeMobileProfile && mFrameCounter % 60U == 0U) {
+            const auto lcd = NativeTopScreenOutputExtent();
+            const double gpuMs = timings ? timings->FrameMilliseconds.value_or(-1.0) : -1.0;
+            std::fprintf(stderr,
+                "TRIAEVUM_MOBILE_GPU frame=%llu gpu_ms=%.2f lcd=%ux%u output=%ux%u colors=%u\n",
+                static_cast<unsigned long long>(mFrameCounter - kFramesInFlight), gpuMs,
+                lcd.Width, lcd.Height, pictureExtent.Width, pictureExtent.Height,
+                mFramePicaAttachmentRequirements.ColorAttachmentCount());
+        }
         if (Extension::GrassStageProfileEnabled()) {
             const auto measured = timings.value_or(Oot3dVulkanGpuTimings{});
             Extension::ReportGrassStageFrame(

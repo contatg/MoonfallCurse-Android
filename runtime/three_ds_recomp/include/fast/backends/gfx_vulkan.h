@@ -996,8 +996,9 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     // presentation picture (NativePicaOutputExtent), or its native-aspect fit
     // for a title that does not widen.
     [[nodiscard]] Extension::RenderExtent NativeTopScreenOutputExtent() const noexcept {
-        const auto output = NativePicaOutputExtent();
-        return mNativeTopScreenExtendsToOutput ? output : Extension::FitNativeTopScreenAspect(output);
+        auto output = NativePicaOutputExtent();
+        if (!mNativeTopScreenExtendsToOutput) output = Extension::FitNativeTopScreenAspect(output);
+        return mNativeMobileProfile ? Extension::LimitNativeTopScreenResolution(output) : output;
     }
     void ExecuteNativePicaBeforeDrawAnchors(
         NativePicaRenderTarget& target, const GfxNativePicaDrawView& draw,
@@ -1384,6 +1385,7 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     VkFormat mSwapchainFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D mSwapchainExtent{};
     bool mNativeTopScreenExtendsToOutput = true;
+    bool mNativeMobileProfile = false;
     // The presentation picture inside the acquired swapchain: the aspect
     // ratio's letterbox, centred (presentation_picture.h). Native PICA
     // targets follow it and scanout places the display in it.

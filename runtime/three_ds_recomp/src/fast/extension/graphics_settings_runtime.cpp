@@ -453,7 +453,22 @@ GraphicsSettingsRuntime::SnapshotWithRevision() const {
 VersionedGraphicsSettings GraphicsSettingsRuntime::SnapshotForRendering() const {
     std::scoped_lock lock(mMutex);
     VersionedGraphicsSettings result{mService.Current(), mRevision};
-    mNativePresentation.Apply(result.Value);
+    if (mNativeMobileProfile) {
+        // The Adreno 610 profile also selects the colour-only shader family,
+        // single sampling and native game cadence. Saved preferences remain
+        // available to other devices and renderers.
+        NativePresentationPolicy{true}.Apply(result.Value);
+        result.Value.Preset = GraphicsPreset::Authentic;
+        result.Value.FrameRate = FrameRateMode::Original30;
+        result.Value.InternalResolutionScale = 1.0F;
+        result.Value.AntiAliasing = AntiAliasingMode::Off;
+        result.Value.MsaaSamples = 1;
+        result.Value.Anisotropy = 1;
+        result.Value.ExtendedDrawDistance = false;
+        result.Value.Effects.WaterReflections = false;
+    } else {
+        mNativePresentation.Apply(result.Value);
+    }
     if (!UsesFullSceneLighting(result.Value.Effects.SurfaceLighting)) {
         result.Value.Effects.DirectionalShadows.Mode = DirectionalShadowMode::Off;
         result.Value.Effects.PointShadows.Mode = PointShadowMode::Off;
@@ -498,18 +513,30 @@ void GraphicsSettingsRuntime::PublishSceneEnvironment(
 }
 bool GraphicsSettingsRuntime::NativePresentationOverrideActive() const {
     std::scoped_lock lock(mMutex);
-    return mNativePresentation.Active();
+    return mNativeMobileProfile || mNativePresentation.Active();
 }
 bool GraphicsSettingsRuntime::NativePresentationOverrideRequired() const {
     std::scoped_lock lock(mMutex);
-    return mNativePresentation.Required();
+    return mNativeMobileProfile || mNativePresentation.Required();
 }
 void GraphicsSettingsRuntime::ToggleNativePresentationOverride() {
     std::scoped_lock lock(mMutex);
-    if (!mNativePresentation.Toggle()) return;
+    if (mNativeMobileProfile || !mNativePresentation.Toggle()) return;
     ++mRevision;
     SPDLOG_INFO("F2 native presentation override: {}", mNativePresentation.Active() ? "on" : "off");
 }
+void GraphicsSettingsRuntime::SetNativeMobileProfile(bool enabled) {
+    std::scoped_lock lock(mMutex);
+    if (mNativeMobileProfile == enabled) return;
+    mNativeMobileProfile = enabled;
+    ++mRevision;
+}
+
+FrameRateMode GraphicsSettingsRuntime::FrameRateForPresentation() const {
+    std::scoped_lock lock(mMutex);
+    return mNativeMobileProfile ? FrameRateMode::Original30 : mService.Current().FrameRate;
+}
+
 GraphicsCapabilities GraphicsSettingsRuntime::Capabilities() const {
     std::scoped_lock lock(mMutex);
     return mCapabilities;

@@ -194,8 +194,12 @@ void GfxRenderingAPIVulkan::Init() {
     }
     CreateLogicalDevice();
     StartupCheckpoint("vulkan_device");
-    if (Extension::AvoidBarrierHeavyMobileEffects(mPhysicalDevice))
+    mNativeMobileProfile = Extension::AvoidBarrierHeavyMobileEffects(mPhysicalDevice);
+    if (mNativeMobileProfile) {
+        Extension::GraphicsSettingsRuntime::Instance().SetNativeMobileProfile(true);
         StartupCheckpoint("vulkan_adreno610_compatibility");
+        StartupCheckpoint("vulkan_adreno610_native_profile");
+    }
 
     CreatePipelineCache();
     CreateCommandResources();
@@ -724,7 +728,7 @@ void GfxRenderingAPIVulkan::Init() {
     CreateFrameResources();
     mScanoutProbe.Initialize(mPhysicalDevice, mDevice, kFramesInFlight);
     mGpuProfiler.Initialize(mPhysicalDevice, mDevice, mGraphicsQueueFamily,
-                            mDiagnostics.Enabled());
+                            mDiagnostics.Enabled(), mNativeMobileProfile);
     mGpuProfiler.AttachBreadcrumbs(mBreadcrumbs.Active() ? &mBreadcrumbs : nullptr);
     if (mGpuProfiler.TimelineEnabled() && mNriInterop.Available())
         mNriInterop.SetTimelineMark([this](uint32_t frameSlot, const char* label) {
@@ -911,6 +915,10 @@ void GfxRenderingAPIVulkan::Shutdown() {
     mPhysicalDevice = VK_NULL_HANDLE;
     mDevice = VK_NULL_HANDLE;
     mCommandPool = VK_NULL_HANDLE;
+    if (mNativeMobileProfile) {
+        Extension::GraphicsSettingsRuntime::Instance().SetNativeMobileProfile(false);
+        mNativeMobileProfile = false;
+    }
     mInitialized = false;
     mFrameActive = false;
     mRenderPassActive = false;
