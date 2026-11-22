@@ -1,6 +1,7 @@
 // Vulkan backend: construction, Init and Shutdown, and the recorded DLSS feature.
 #ifdef ENABLE_OOT3D_VULKAN
 #include "gfx_vulkan_internal.h"
+#include "../extension/android_vulkan_compatibility.h"
 #include "fast/extension/grass_texture_source_cache.h"
 #include "fast/backends/startup_checkpoints.h"
 
@@ -193,6 +194,9 @@ void GfxRenderingAPIVulkan::Init() {
     }
     CreateLogicalDevice();
     StartupCheckpoint("vulkan_device");
+    if (Extension::AvoidBarrierHeavyMobileEffects(mPhysicalDevice))
+        StartupCheckpoint("vulkan_adreno610_compatibility");
+
     CreatePipelineCache();
     CreateCommandResources();
     if (mNriInterop.Initialize(mInstance, mPhysicalDevice, mDevice, mGraphicsQueueFamily,
@@ -425,6 +429,7 @@ void GfxRenderingAPIVulkan::Init() {
         SPDLOG_INFO("OOT3D Vulkan Hi-Z unavailable: {}",
                     mHiZDepthPyramidPass.UnavailableReason());
     }
+    StartupCheckpoint("vulkan_init_reflections");
     if (!mHiZReflectionPass.Initialize(
             mPhysicalDevice, mDevice, mNriInterop)) {
         SPDLOG_INFO("OOT3D Vulkan SSR unavailable: {}",
@@ -693,6 +698,7 @@ void GfxRenderingAPIVulkan::Init() {
         Extension::GraphicsSettingsRuntime::Instance().SetCapability(
             Extension::GraphicsCapability::ScreenSpaceGlobalIllumination, supported, reason);
     }
+    StartupCheckpoint("vulkan_init_interactive_grass");
     if (!mInteractiveGrassPass.Initialize(mPhysicalDevice, mDevice,
                                           mNriInterop.Shaders(),
                                           mNativePicaCanonicalRenderPass,
@@ -707,6 +713,7 @@ void GfxRenderingAPIVulkan::Init() {
                                    mNativePicaCanonicalRenderPass, mNativePicaRenderPass,
                                    mNativePicaSampleCount, mPicaDynamicRenderingScope.Available(),
                                    mDepthFormat, mPipelineCache);
+    StartupCheckpoint("vulkan_init_frame_resources");
     CreateFrameResources();
     mScanoutProbe.Initialize(mPhysicalDevice, mDevice, kFramesInFlight);
     mGpuProfiler.Initialize(mPhysicalDevice, mDevice, mGraphicsQueueFamily,

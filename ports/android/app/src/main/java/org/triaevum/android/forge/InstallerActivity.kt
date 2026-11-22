@@ -103,6 +103,7 @@ class InstallerActivity : Activity() {
     private lateinit var languages: RadioGroup
     private lateinit var select: Button
     private lateinit var installButton: Button
+    private val hasPipelineRecipes by lazy { ForgePackage.hasPipelineRecipes(this) }
     private lateinit var prewarmPipelines: CheckBox
     private lateinit var prewarmDetails: TextView
     private lateinit var cancel: Button
@@ -1045,7 +1046,7 @@ class InstallerActivity : Activity() {
         val language = codes.getOrNull(languageIndex())
         val name = romName
         val document = romDocument
-        val prewarm = prewarmPipelines.isChecked
+        val prewarm = hasPipelineRecipes && prewarmPipelines.isChecked
         rom = null
         interrupted = null
         refreshInstall(true)
@@ -1275,8 +1276,9 @@ class InstallerActivity : Activity() {
         val ready = rom != null && recognizedLabel != null
         installButton.visibility = if (ready) Button.VISIBLE else Button.GONE
         installButton.isEnabled = ready && !busy
-        prewarmPipelines.visibility = installButton.visibility
-        prewarmDetails.visibility = installButton.visibility
+        val prewarmVisibility = if (hasPipelineRecipes) installButton.visibility else View.GONE
+        prewarmPipelines.visibility = prewarmVisibility
+        prewarmDetails.visibility = prewarmVisibility
         prewarmPipelines.isEnabled = ready && !busy
     }
 

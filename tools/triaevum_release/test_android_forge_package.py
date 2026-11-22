@@ -155,6 +155,20 @@ class AndroidForgePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not empty"):
                 fixture.create()
 
+    def test_on_device_shader_build_keeps_install_data_without_corpus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(Path(directory))
+            inventory = create_package(fixture.reference, fixture.stage, fixture.output,
+                                       source_commit="8" * 40, compile_shaders_on_device=True)
+            package = fixture.output / ASSET_ROOT
+            title = json.loads((package / CATALOG).read_text())["titles"][0]
+            self.assertIn("renderer_shader_preparation", title)
+            self.assertNotIn("shader_preparation", title)
+            self.assertNotIn("device_pipeline_preparation", title)
+            self.assertFalse((package / "forge/shader-corpus").exists())
+            self.assertTrue((package / "recipes/oot3d.json").is_file())
+            self.assertNotIn("portable_shader_corpus", {record["role"] for record in inventory["files"]})
+
     def test_unclassified_roles_and_undeclared_data_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Fixture(Path(directory))

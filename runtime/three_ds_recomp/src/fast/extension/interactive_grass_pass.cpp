@@ -10,6 +10,8 @@
 
 #ifdef ENABLE_OOT3D_VULKAN
 
+#include "android_vulkan_compatibility.h"
+
 #include "fast/extension/grass_async_placement_builder.h"
 #include "fast/extension/grass_static_placement_cache.h"
 #include "fast/extension/grass_blade_geometry.h"
@@ -1298,10 +1300,14 @@ bool InteractiveGrassPass::Initialize(VkPhysicalDevice physicalDevice,
                                       VkFormat depthFormat,
                                       VkPipelineCache pipelineCache) {
     Shutdown();
-    mImpl->PhysicalDevice = physicalDevice;
-    mImpl->PipelineCache = pipelineCache;
     VkPhysicalDeviceProperties grassDeviceProperties{};
     vkGetPhysicalDeviceProperties(physicalDevice, &grassDeviceProperties);
+    if (AvoidBarrierHeavyMobileEffects(grassDeviceProperties)) {
+        mImpl->Reason = "interactive grass is disabled on Android Adreno 610";
+        return false;
+    }
+    mImpl->PhysicalDevice = physicalDevice;
+    mImpl->PipelineCache = pipelineCache;
     mImpl->BaseCandidateCapacity = std::min(8U * 1024U * 1024U,
         grassDeviceProperties.limits.maxStorageBufferRange / static_cast<uint32_t>(sizeof(GrassWorldAnchor)));
     mImpl->SetMemoryShift(mImpl->MemoryShift, 0);

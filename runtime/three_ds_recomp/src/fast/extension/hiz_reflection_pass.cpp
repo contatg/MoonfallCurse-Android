@@ -1,6 +1,8 @@
 #include "fast/extension/hiz_reflection_pass.h"
 
 #ifdef ENABLE_OOT3D_VULKAN
+
+#include "android_vulkan_compatibility.h"
 #include "fast/extension/hiz_reflection.h"
 #include "fast/extension/nri_effect_graph_transient_image_arena.h"
 #include "fast/extension/nri_interop_context.h"
@@ -156,6 +158,10 @@ bool HiZReflectionPass::Initialize(VkPhysicalDevice physicalDevice,
                                    VkDevice device,
                                    NriInteropContext& interop) {
     Shutdown();
+    if (AvoidBarrierHeavyMobileEffects(physicalDevice)) {
+        mImpl->Reason = "screen-space reflections are disabled on Android Adreno 610";
+        return false;
+    }
     mImpl->Device = device;
     mImpl->Interop = &interop;
     if (!interop.Available()) {

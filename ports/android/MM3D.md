@@ -90,3 +90,17 @@ For a device comparison, use the same graphics preset and scene with each
 driver. Record time to first frame, frame times for the first and repeated
 runs, and any startup or presentation errors. Include the phone, Android
 version, GPU and Turnip package version.
+
+## Building without the portable shader corpus
+
+Pass `--compile-shaders-on-device` to `tools/android/android_release.py` for a
+smaller APK. Forge still checks and imports the cartridge dump. The runtime
+compiles missing shaders on the device and keeps a persistent shader cache.
+New effects and areas can stutter while the cache is cold. The installer
+offers device pipeline prewarming only when the package includes its recipes.
+
+On Android Adreno 610, the Vulkan renderer skips optional interactive grass,
+screen-space reflections, contact shadows and NRI upscaling. This avoids
+several compute shaders with workgroup barriers while keeping native GPU
+rendering. Check for `vulkan_adreno610_compatibility`, `renderer_ready` and
+`first_frame_presented` in the startup report when testing this GPU.
