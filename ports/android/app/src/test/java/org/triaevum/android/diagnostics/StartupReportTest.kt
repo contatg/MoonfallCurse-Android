@@ -112,6 +112,8 @@ class StartupReportTest {
         assertTrue(ExitReasons.abnormal(ExitReasons.ANR))
         assertTrue(ExitReasons.abnormal(ExitReasons.LOW_MEMORY))
         assertFalse(ExitReasons.abnormal(ExitReasons.EXIT_SELF))
+        assertTrue(ExitReasons.abnormal(ExitReasons.EXIT_SELF, 1))
+        assertEquals("exited with an error", ExitReasons.name(ExitReasons.EXIT_SELF, 1))
         assertFalse(ExitReasons.abnormal(ExitReasons.USER_REQUESTED))
         assertEquals("1.1.0", StartupReport.vulkanVersion(4198400))
         assertEquals("1.3.0", StartupReport.vulkanVersion((1 shl 22) or (3 shl 12)))

@@ -5,6 +5,7 @@
 #include <string_view>
 
 void InitializeAndroidGameHost();
+void RecordAndroidGameExit(int status) noexcept;
 void SetAndroidPresentationRate(uint32_t hz) noexcept;
 
 // The in-game menu's "Export saves" / "Share diagnostics" (InGameMenuHost::

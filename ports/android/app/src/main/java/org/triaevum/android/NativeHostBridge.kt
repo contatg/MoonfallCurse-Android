@@ -8,6 +8,8 @@ object NativeHostBridge {
      */
     external fun takeInstallerPage(): String?
 
+    external fun gameExitStatus(): Int
+
     /**
      * The activity is leaving the foreground: the game opens its menu (the menu's hold), so it
      * waits for the player when they come back.

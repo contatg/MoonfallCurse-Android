@@ -163,8 +163,18 @@ GfxRenderingAPIVulkan::ResolveNativePicaTexture(
     const GfxNativePicaTextureView& textureView, std::string* error,
     uint64_t replacementGeneration, uint64_t renderTargetNamespace,
     const uint64_t* precomputedContentHash) {
-    const GfxNativePicaTextureView& texture = textureView;
     try {
+        GfxNativePicaTextureView texture = textureView;
+        const bool compatibilityCopy = texture.NativeType != 2U &&
+            !texture.CopyReferences.empty() && !mNriPicaTextureCopyDerivePass.Available();
+        std::vector<uint8_t> materializedBytes;
+        if (compatibilityCopy) {
+            materializedBytes = MaterializeGpuTextureCopySampler(texture, renderTargetNamespace);
+            texture.NativeBytes = materializedBytes;
+            texture.CopyReferences = {};
+            texture.NativeBaseLevelContentHashAvailable = false;
+            precomputedContentHash = nullptr;
+        }
         NativePicaTextureKey key;
         key.ReplacementGeneration = replacementGeneration;
         key.PhysicalAddress = texture.PhysicalAddress;
@@ -350,7 +360,7 @@ GfxRenderingAPIVulkan::ResolveNativePicaTexture(
                 uint64_t{texture.Width} * texture.Height;
             return record;
         }
-        const auto baseLevelContentHash = !shadow2d
+        const auto baseLevelContentHash = !shadow2d && !compatibilityCopy
             ? ResolveNativeTextureBaseLevelContentHash(texture)
             : std::nullopt;
         if (baseLevelContentHash.has_value()) {
@@ -469,7 +479,7 @@ GfxRenderingAPIVulkan::ResolveNativePicaTexture(
 
         NativePicaTextureKey replacementKey = key;
         replacementKey.CustomReplacement = true;
-        if (!shadow2d) {
+        if (!shadow2d && !compatibilityCopy) {
             if (const auto replacement =
                     mNativePicaTextures.find(replacementKey);
                 replacement != mNativePicaTextures.end()) {
@@ -481,7 +491,7 @@ GfxRenderingAPIVulkan::ResolveNativePicaTexture(
         const auto found = mNativePicaTextures.find(key);
         if (found != mNativePicaTextures.end()) {
             auto& record = found->second;
-            if (!shadow2d &&
+            if (!shadow2d && !compatibilityCopy &&
                 record.CustomReplacementHash != 0U &&
                 (record.CustomReplacementPending ||
                  record.CustomReplacementReady)) {
@@ -646,16 +656,18 @@ GfxRenderingAPIVulkan::ResolveNativePicaTexture(
                               decodedMip.end());
                 nativeOffset += *encodedBytes;
             }
-            Extension::GrassTextureSourceCache::Instance().ObserveDecoded(
-                baseLevelContentHash.value_or(key.ContentHash),
-                key.Width, key.Height,
-                std::span<const uint8_t>(pixels).first(baseDecodedBytes));
+            if (!compatibilityCopy) {
+                Extension::GrassTextureSourceCache::Instance().ObserveDecoded(
+                    baseLevelContentHash.value_or(key.ContentHash),
+                    key.Width, key.Height,
+                    std::span<const uint8_t>(pixels).first(baseDecodedBytes));
+            }
         }
         uint32_t uploadWidth = texture.Width;
         uint32_t uploadHeight = texture.Height;
         ::Oot3d::Renderer::AzaharTextureResolveResult
             replacementResult;
-        if (!shadow2d) {
+        if (!shadow2d && !compatibilityCopy) {
             replacementResult =
                 ::Oot3d::Renderer::AzaharTexturePackRuntime::
                     Instance()
@@ -815,7 +827,7 @@ void GfxRenderingAPIVulkan::CreateNativePicaTextureStorage(
         if (storageView) {
             // A derived raw-copy image is materialized on the GPU, so its
             // compute pass needs a storage view of it.
-            imageInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+            imageInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         }
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;

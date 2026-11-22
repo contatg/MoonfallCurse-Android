@@ -400,6 +400,8 @@ void GfxRenderingAPIVulkan::Init() {
             mNriPicaTextureCopyCapturePass.UnavailableReason());
     }
     if (!mNriPicaTextureCopyDerivePass.Initialize(mNriInterop)) {
+        StartupCheckpointf("vulkan_pica_copy_compatibility %s",
+                           mNriPicaTextureCopyDerivePass.UnavailableReason().c_str());
         SPDLOG_INFO(
             "OOT3D Vulkan NRI PICA raw-copy derivation unavailable: {}",
             mNriPicaTextureCopyDerivePass.UnavailableReason());

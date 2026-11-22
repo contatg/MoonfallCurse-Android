@@ -1609,10 +1609,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     };
     // Immutable GPU copies of raw-transfer sources, captured at the copy's
     // order boundary at the source's actual internal extent. This register owns
-    // those images: texture records borrow them, never re-create them and never
-    // read them back. It replaces the writeback register, which re-implemented
-    // the copy's output on the CPU and let the sampler infer ownership from a
-    // missing content hash.
+    // those images. The compatibility sampler can materialize native bytes
+    // on demand when the NRI copy derivation pass is unavailable.
     struct GpuTextureCopySurface {
         uint64_t Identity = 0;
         uint64_t RenderTargetNamespace = 0;
@@ -1660,6 +1658,7 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         bool ImagePoolable = false;
         VkImageView ImageView = VK_NULL_HANDLE;        // sampled view of Image (pool payload)
         VkImageView NativeImageView = VK_NULL_HANDLE;  // sampled view of NativeImage
+        VkDeviceMemory ImageMemory = VK_NULL_HANDLE;  // Vulkan-owned capture
     };
     // The boundary canvas the scene composer materializes and owns.
     Extension::NriOwnedTexture2D mNativePicaSceneCopyCanvas;
@@ -1674,6 +1673,13 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     void FlushGpuTextureCopyPrefix();
     bool ReadGpuTextureCopyBytes(uint64_t identity, uint32_t address,
                                  std::span<uint8_t> bytes);
+    const GpuTextureCopySurface* FindGpuTextureCopyProducer(
+        uint64_t renderTargetNamespace,
+        const Renderer3ds::PicaTextureCopyReference& reference) const;
+    std::vector<uint8_t> MaterializeGpuTextureCopySampler(
+        const GfxNativePicaTextureView& texture, uint64_t renderTargetNamespace);
+    void CaptureGpuTextureCopyVulkan(const GpuTextureCopySourceImport& source,
+                                    GpuTextureCopySurface& surface);
     std::array<uint64_t, kFramesInFlight> mGpuCopySubmittedFrames{};
     std::map<uint64_t, GpuTextureCopySurface> mGpuTextureCopySurfaces;
     // (render target namespace, completion id, order boundary) -> surface
