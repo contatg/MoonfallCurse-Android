@@ -240,14 +240,14 @@ void GraphicsSettingsPanel::Draw() {
     GrassSceneBridge::Instance().HighlightMask(std::nullopt);
     const bool nativeRequired = GraphicsSettingsRuntime::Instance().NativePresentationOverrideRequired();
     if (nativeRequired) {
-        ImGui::TextWrapped("Native presentation: Grass, Toon/outline, AO and reflections are unavailable in this build.");
+        ImGui::TextWrapped("Native presentation is required by this device profile. Extra effects are suspended.");
     } else {
         ImGui::TextWrapped("F2: quick native presentation - Grass, Toon/outline, AO and reflections off.");
     }
     const bool nativeOverride = GraphicsSettingsRuntime::Instance().NativePresentationOverrideActive();
     ImGui::PushStyleColor(ImGuiCol_Text, nativeOverride ? ImVec4(1.0F, 0.78F, 0.25F, 1.0F)
                                                       : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextWrapped(nativeRequired ? "Vulkan/NRI active. Configured effect values are preserved." : nativeOverride
+    ImGui::TextWrapped(nativeRequired ? "Configured effect values are preserved." : nativeOverride
         ? "F2 override ACTIVE. Configured effects are suspended; press F2 to restore."
         : "F2 override inactive. Using configured effects.");
     ImGui::PopStyleColor();

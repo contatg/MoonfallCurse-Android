@@ -57,7 +57,7 @@ def forge_rustflags() -> str:
 
 
 def recipe(title: str, *, ndk: Path, work: Path, translated_sources: Path, reference_package: Path,
-           a32_registry: Path | None = None,
+           a32_registry: Path | None = None, compile_shaders_on_device: bool = False,
            source_commit: str, gradle: str = "gradle", windows: bool = os.name == "nt",
            environ: dict | None = None, rustflags: str | None = None) -> list[tuple[str, list[str], dict]]:
     """[(step, argv, extra environment)] for `title`."""
@@ -104,6 +104,7 @@ def recipe(title: str, *, ndk: Path, work: Path, translated_sources: Path, refer
         ("forge package", [sys.executable, "-m", "tools.triaevum_release.android_forge_package",
                            "--title", title, "--reference-package", str(reference_package),
                            "--native-stage", str(stage), "--source-commit", source_commit, "--output", str(package),
+                           *(["--compile-shaders-on-device"] if compile_shaders_on_device else []),
                            *(["--sign"] if environ.get("TRIAEVUM_RELEASE_SIGNING_KEY") else [])], {}),
     ]
     signed = all(environ.get(name) for name in SIGNING_VARIABLES)
@@ -126,12 +127,14 @@ def main(argv=None) -> int:
     parser.add_argument("--reference-package", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--gradle", default="gradle")
+    parser.add_argument("--compile-shaders-on-device", action="store_true",
+                        help="omit the portable shader corpus from the Android APK")
     parser.add_argument("--run", action="store_true", help="execute the steps (default: print them)")
     args = parser.parse_args(argv)
     if args.work.resolve().is_relative_to(ROOT):
         parser.error("--work must be outside the repository")
     steps = recipe(args.title, ndk=args.ndk, work=args.work, translated_sources=args.translated_sources,
-                   a32_registry=args.a32_registry,
+                   a32_registry=args.a32_registry, compile_shaders_on_device=args.compile_shaders_on_device,
                    reference_package=args.reference_package, source_commit=args.source_commit, gradle=args.gradle)
     for step, command, extra in steps:
         prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in extra.items())

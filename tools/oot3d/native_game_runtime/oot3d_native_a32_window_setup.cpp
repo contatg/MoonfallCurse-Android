@@ -1839,8 +1839,7 @@ void NativeA32WindowSession::Setup() {
   presentationPacingPolicy =
       Fast::Extension::ResolvePresentationPacingPolicy(
           Fast::Extension::GraphicsSettingsRuntime::Instance()
-              .Snapshot()
-              .FrameRate);
+              .FrameRateForPresentation());
   frameCompositionPolicy =
       ResolveFrameCompositionPolicy(presentationPacingPolicy);
   visualSampleCadence.Configure(
@@ -2094,7 +2093,7 @@ void NativeA32WindowSession::ApplySelectedUiProfile() {
 
 void NativeA32WindowSession::UpdateScenePresentation() {
   auto &window = *windowPointer;
-  const auto graphics = Fast::Extension::GraphicsSettingsRuntime::Instance().Snapshot();
+  const auto graphics = Fast::Extension::GraphicsSettingsRuntime::Instance().SnapshotForRendering().Value;
   // The picture is the aspect ratio's letterbox in the window; the scene's
   // FOV policy follows the picture's shape (the renderer sizes its targets
   // to the same picture), never the window's.

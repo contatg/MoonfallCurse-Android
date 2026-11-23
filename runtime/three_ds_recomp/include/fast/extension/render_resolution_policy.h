@@ -53,7 +53,8 @@ inline constexpr float kMinimumUpscalerRenderScale = 1.0F / 3.0F;
 // A title may pad the target's storage width past its 480 samples (MM3D
 // allocates 512 and draws a 480-sample viewport): the padding is scaled at the
 // density of the visible samples, so the transfer and the draws keep their
-// native proportions.
+// native proportions. The native mobile profile requests one sample per
+// presented pixel even below 480 lines.
 inline constexpr std::uint32_t kNativeTopScreenMaximumStorageWidth = 512U;
 
 [[nodiscard]] inline bool IsNativeTopScreenTarget(RenderExtent guestExtent) noexcept {
@@ -75,20 +76,38 @@ inline constexpr std::uint32_t kNativeTopScreenMaximumStorageWidth = 512U;
     return {output.Width, std::max<uint32_t>(1U, static_cast<uint32_t>(heightAtWidth))};
 }
 
-[[nodiscard]] inline bool NativeTopScreenAtPresentedDensity(RenderExtent outputExtent) noexcept {
-    return outputExtent.Height >= kNativeTopScreenPhysicalWidth;
+// Fit the internal LCD image within one native screen while preserving
+// the selected aspect. Scanout still covers the presentation viewport.
+[[nodiscard]] inline RenderExtent LimitNativeTopScreenResolution(RenderExtent extent) noexcept {
+    if (extent.Width == 0U || extent.Height == 0U ||
+        (extent.Width <= kNativeTopScreenLogicalWidth && extent.Height <= kNativeTopScreenLogicalHeight)) {
+        return extent;
+    }
+    if (uint64_t{extent.Width} * kNativeTopScreenLogicalHeight >=
+        uint64_t{extent.Height} * kNativeTopScreenLogicalWidth) {
+        return {kNativeTopScreenLogicalWidth, std::max(1U, static_cast<uint32_t>(
+            (uint64_t{extent.Height} * kNativeTopScreenLogicalWidth + extent.Width / 2U) / extent.Width))};
+    }
+    return {std::max(1U, static_cast<uint32_t>(
+        (uint64_t{extent.Width} * kNativeTopScreenLogicalHeight + extent.Height / 2U) / extent.Height)),
+        kNativeTopScreenLogicalHeight};
+}
+
+[[nodiscard]] inline bool NativeTopScreenAtPresentedDensity(
+    RenderExtent outputExtent, bool singleSample = false) noexcept {
+    return singleSample || outputExtent.Height >= kNativeTopScreenPhysicalWidth;
 }
 
 [[nodiscard]] inline RenderExtent ResolveNativePicaRenderExtent(
     RenderExtent guestExtent, RenderExtent outputExtent,
-    float internalScale) {
+    float internalScale, bool singleSampleTopScreen = false) {
     RenderExtent base = guestExtent;
     if (IsNativeTopScreenTarget(guestExtent) &&
         outputExtent.Width != 0U && outputExtent.Height != 0U) {
         // Stored rotated: physical X spans the output's height. The visible
         // 480 samples take it; storage padding follows at the same density.
         const uint64_t visibleWidth = static_cast<uint64_t>(outputExtent.Height) *
-            (NativeTopScreenAtPresentedDensity(outputExtent) ? 1U : 2U);
+            (NativeTopScreenAtPresentedDensity(outputExtent, singleSampleTopScreen) ? 1U : 2U);
         base = {static_cast<uint32_t>(
                     (visibleWidth * guestExtent.Width + kNativeTopScreenPhysicalWidth / 2U) /
                     kNativeTopScreenPhysicalWidth),
@@ -103,8 +122,9 @@ inline constexpr std::uint32_t kNativeTopScreenMaximumStorageWidth = 512U;
 // coordinates fitted with uniform proportions (placed UI, movie pictures)
 // correct their X scale by it.
 [[nodiscard]] inline float NativeTopScreenStorageSamplingX(
-    RenderExtent guestExtent, RenderExtent outputExtent) noexcept {
-    return IsNativeTopScreenTarget(guestExtent) && NativeTopScreenAtPresentedDensity(outputExtent) ? 0.5F : 1.0F;
+    RenderExtent guestExtent, RenderExtent outputExtent, bool singleSample = false) noexcept {
+    return IsNativeTopScreenTarget(guestExtent) &&
+        NativeTopScreenAtPresentedDensity(outputExtent, singleSample) ? 0.5F : 1.0F;
 }
 
 } // namespace Fast::Extension

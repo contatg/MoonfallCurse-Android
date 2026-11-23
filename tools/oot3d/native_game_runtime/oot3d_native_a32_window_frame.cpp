@@ -223,8 +223,7 @@ bool NativeA32WindowSession::RunFrame() {
   const auto requestedPresentationPolicy =
       Fast::Extension::ResolvePresentationPacingPolicy(
           Fast::Extension::GraphicsSettingsRuntime::Instance()
-              .Snapshot()
-              .FrameRate);
+              .FrameRateForPresentation());
   if (Fast::Extension::PresentationPacingPolicyChanged(
           presentationPacingPolicy, requestedPresentationPolicy)) {
     const auto requestedCompositionPolicy =

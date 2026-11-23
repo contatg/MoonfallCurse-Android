@@ -1,6 +1,7 @@
 // Vulkan backend: construction, Init and Shutdown, and the recorded DLSS feature.
 #ifdef ENABLE_OOT3D_VULKAN
 #include "gfx_vulkan_internal.h"
+#include "../extension/android_vulkan_compatibility.h"
 #include "fast/extension/grass_texture_source_cache.h"
 #include "fast/backends/startup_checkpoints.h"
 
@@ -193,6 +194,13 @@ void GfxRenderingAPIVulkan::Init() {
     }
     CreateLogicalDevice();
     StartupCheckpoint("vulkan_device");
+    mNativeMobileProfile = Extension::AvoidBarrierHeavyMobileEffects(mPhysicalDevice);
+    if (mNativeMobileProfile) {
+        Extension::GraphicsSettingsRuntime::Instance().SetNativeMobileProfile(true);
+        StartupCheckpoint("vulkan_adreno610_compatibility");
+        StartupCheckpoint("vulkan_adreno610_native_profile");
+    }
+
     CreatePipelineCache();
     CreateCommandResources();
     if (mNriInterop.Initialize(mInstance, mPhysicalDevice, mDevice, mGraphicsQueueFamily,
@@ -396,6 +404,13 @@ void GfxRenderingAPIVulkan::Init() {
             mNriPicaTextureCopyCapturePass.UnavailableReason());
     }
     if (!mNriPicaTextureCopyDerivePass.Initialize(mNriInterop)) {
+        InitializeVulkanCopyDerivation();
+        if (mVulkanCopyDerivePipeline != VK_NULL_HANDLE) {
+            StartupCheckpoint("vulkan_pica_copy_gpu");
+        } else {
+            StartupCheckpointf("vulkan_pica_copy_compatibility %s",
+                               mNriPicaTextureCopyDerivePass.UnavailableReason().c_str());
+        }
         SPDLOG_INFO(
             "OOT3D Vulkan NRI PICA raw-copy derivation unavailable: {}",
             mNriPicaTextureCopyDerivePass.UnavailableReason());
@@ -425,6 +440,7 @@ void GfxRenderingAPIVulkan::Init() {
         SPDLOG_INFO("OOT3D Vulkan Hi-Z unavailable: {}",
                     mHiZDepthPyramidPass.UnavailableReason());
     }
+    StartupCheckpoint("vulkan_init_reflections");
     if (!mHiZReflectionPass.Initialize(
             mPhysicalDevice, mDevice, mNriInterop)) {
         SPDLOG_INFO("OOT3D Vulkan SSR unavailable: {}",
@@ -693,6 +709,7 @@ void GfxRenderingAPIVulkan::Init() {
         Extension::GraphicsSettingsRuntime::Instance().SetCapability(
             Extension::GraphicsCapability::ScreenSpaceGlobalIllumination, supported, reason);
     }
+    StartupCheckpoint("vulkan_init_interactive_grass");
     if (!mInteractiveGrassPass.Initialize(mPhysicalDevice, mDevice,
                                           mNriInterop.Shaders(),
                                           mNativePicaCanonicalRenderPass,
@@ -707,10 +724,11 @@ void GfxRenderingAPIVulkan::Init() {
                                    mNativePicaCanonicalRenderPass, mNativePicaRenderPass,
                                    mNativePicaSampleCount, mPicaDynamicRenderingScope.Available(),
                                    mDepthFormat, mPipelineCache);
+    StartupCheckpoint("vulkan_init_frame_resources");
     CreateFrameResources();
     mScanoutProbe.Initialize(mPhysicalDevice, mDevice, kFramesInFlight);
     mGpuProfiler.Initialize(mPhysicalDevice, mDevice, mGraphicsQueueFamily,
-                            mDiagnostics.Enabled());
+                            mDiagnostics.Enabled(), mNativeMobileProfile);
     mGpuProfiler.AttachBreadcrumbs(mBreadcrumbs.Active() ? &mBreadcrumbs : nullptr);
     if (mGpuProfiler.TimelineEnabled() && mNriInterop.Available())
         mNriInterop.SetTimelineMark([this](uint32_t frameSlot, const char* label) {
@@ -868,6 +886,7 @@ void GfxRenderingAPIVulkan::Shutdown() {
         }
         DestroyGpuTextureCopySurfaces();  // also releases the GPU-copy image pool
         ReleaseGpuCopySamplerCache();
+        DestroyVulkanCopyDerivation();
         DestroyRawCopyEncodeResources();
         if (mOot3dShadow2dRenderPass != VK_NULL_HANDLE) {
             vkDestroyRenderPass(mDevice, mOot3dShadow2dRenderPass, nullptr);
@@ -896,6 +915,10 @@ void GfxRenderingAPIVulkan::Shutdown() {
     mPhysicalDevice = VK_NULL_HANDLE;
     mDevice = VK_NULL_HANDLE;
     mCommandPool = VK_NULL_HANDLE;
+    if (mNativeMobileProfile) {
+        Extension::GraphicsSettingsRuntime::Instance().SetNativeMobileProfile(false);
+        mNativeMobileProfile = false;
+    }
     mInitialized = false;
     mFrameActive = false;
     mRenderPassActive = false;

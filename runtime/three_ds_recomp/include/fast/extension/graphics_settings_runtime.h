@@ -83,6 +83,8 @@ class GraphicsSettingsRuntime final {
     [[nodiscard]] bool NativePresentationOverrideActive() const;
     [[nodiscard]] bool NativePresentationOverrideRequired() const;
     void ToggleNativePresentationOverride();
+    void SetNativeMobileProfile(bool enabled);
+    [[nodiscard]] FrameRateMode FrameRateForPresentation() const;
     [[nodiscard]] GraphicsCapabilities Capabilities() const;
     [[nodiscard]] PresentationTransactionStatus PresentationStatus() const;
     [[nodiscard]] GraphicsDisplayMetrics DisplayMetrics() const;
@@ -148,6 +150,7 @@ class GraphicsSettingsRuntime final {
     std::shared_ptr<GraphicsSettingsPersistencePort> mPersistence;
     uint64_t mRevision = 1;
     NativePresentationPolicy mNativePresentation;
+    bool mNativeMobileProfile = false;
     bool mPersistenceSuppressed = false;
     GraphicsSettingsSaveState mSaveState = GraphicsSettingsSaveState::Saved;
     GraphicsPresetLibrary mUserPresets;

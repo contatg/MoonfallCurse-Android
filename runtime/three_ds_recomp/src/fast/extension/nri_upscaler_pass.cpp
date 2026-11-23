@@ -2,6 +2,8 @@
 
 #ifdef ENABLE_OOT3D_VULKAN
 
+#include "android_vulkan_compatibility.h"
+
 #include "fast/extension/nri_effect_graph_transient_image_arena.h"
 #include "fast/extension/nri_interop_context.h"
 #include "fast/extension/upscaler_orientation.h"
@@ -15,6 +17,10 @@ bool NriUpscalerPass::Initialize(VkPhysicalDevice physicalDevice,
                                  VkDevice device,
                                  NriInteropContext& interop) {
     Shutdown();
+    if (AvoidBarrierHeavyMobileEffects(physicalDevice)) {
+        mUnavailableReason = "compute upscaling is disabled on Android Adreno 610";
+        return false;
+    }
     mDevice = device;
     mInterop = &interop;
     // Optional: without it DLSS reconstructs the surface as stored.

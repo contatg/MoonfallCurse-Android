@@ -217,4 +217,10 @@
     <string name="forge_background_progress_hint">Continues in the background, even with the screen locked.</string>
     <string name="forge_language_automatic">Automatic (device language)</string>
     <string name="forge_language_automatic_button">Language: Automatic</string>
+    <string name="forge_gpu_driver">GPU driver</string>
+    <string name="forge_driver_system">System driver selected. Import a trusted Mesa Turnip ZIP for a compatible Adreno GPU.</string>
+    <string name="forge_turnip_imported">Turnip imported. It will be tried on the next game launch. If startup fails, return here and select the system driver.</string>
+    <string name="forge_turnip_import">Import Turnip ZIP</string>
+    <string name="forge_driver_use_system">Use system driver</string>
+    <string name="forge_turnip_failed">Could not change the GPU driver.</string>
 </resources>

@@ -4,6 +4,8 @@
 
 #ifdef ENABLE_OOT3D_VULKAN
 
+#include "android_vulkan_compatibility.h"
+
 #include "fast/extension/nri_interop_context.h"
 #include "fast/extension/pica_directional_shadow_caster.h"
 #include "fast/extension/pica_directional_shadow_semantics.h"
@@ -1204,7 +1206,7 @@ bool NriDirectionalShadowPass::Initialize(VkPhysicalDevice physicalDevice, VkDev
             throw std::runtime_error("directional shadow receiver sampler creation failed");
         }
 
-        {
+        if (!AvoidBarrierHeavyMobileEffects(physicalDevice)) {
             // Contact shadows: camera depth (texture + sampler) in, R8
             // visibility (storage) out, Godot's push constants.
             const std::array<nri::DescriptorRangeDesc, 3> contactRanges{ {

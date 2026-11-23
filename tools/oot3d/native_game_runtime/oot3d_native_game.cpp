@@ -461,6 +461,9 @@ int main(int argc, char** argv) {
         if (!ParseOot3dNativeGameArgs(argc, argv, launch)) {
             TriAevum::EarlyLog("the launch arguments are invalid (an unknown option or a missing value)");
             PrintOot3dNativeGameUsage();
+#if defined(__ANDROID__)
+            RecordAndroidGameExit(2);
+#endif
             return 2;
         }
 #if !defined(__SWITCH__)
@@ -532,6 +535,9 @@ int main(int argc, char** argv) {
         // After the window is gone, so the dialog is not hidden behind it.
         if (fatalDialog)
             ShowFatalErrorForDemo(TriAevum::kFatalDialogTitle, TriAevum::FatalDialogText(ex.what(), reportDirectory));
+#if defined(__ANDROID__)
+        RecordAndroidGameExit(1);
+#endif
         return 1;
     }
 }

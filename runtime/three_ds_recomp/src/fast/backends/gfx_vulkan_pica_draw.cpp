@@ -3126,7 +3126,7 @@ bool GfxRenderingAPIVulkan::SubmitPicaDraw(
             renderTarget.Height,
             Extension::NativeTopScreenStorageSamplingX(
                 {draw.FramebufferWidth, draw.FramebufferHeight},
-                NativeTopScreenOutputExtent()),
+                NativeTopScreenOutputExtent(), mNativeMobileProfile),
             uiFrameExtensionY);
         if (uiFrameExtensionY > 1.0F) {
             const std::array<float, 2> clipScaleDelta{0.0F, 1.0F / uiFrameExtensionY - 1.0F};

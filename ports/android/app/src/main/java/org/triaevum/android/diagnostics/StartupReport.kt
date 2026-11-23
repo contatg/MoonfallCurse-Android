@@ -13,7 +13,7 @@ data class ExitRecord(
     val pssKb: Long,
     val rssKb: Long,
 ) {
-    val abnormal: Boolean get() = ExitReasons.abnormal(reason)
+    val abnormal: Boolean get() = ExitReasons.abnormal(reason, status)
 }
 
 /** The device facts of a report; values the platform cannot provide are null. */
@@ -45,8 +45,8 @@ object ExitReasons {
     const val DEPENDENCY_DIED = 12
     const val FREEZER = 14
 
-    fun name(reason: Int): String = when (reason) {
-        EXIT_SELF -> "exited normally"
+    fun name(reason: Int, status: Int = 0): String = when (reason) {
+        EXIT_SELF -> if (status == 0) "exited normally" else "exited with an error"
         SIGNALED -> "killed by a signal"
         LOW_MEMORY -> "killed for low memory"
         CRASH -> "Java crash"
@@ -61,7 +61,7 @@ object ExitReasons {
     }
 
     /** Exits worth a report: crashes, hangs, start failures and system kills under pressure. */
-    fun abnormal(reason: Int): Boolean = reason in setOf(
+    fun abnormal(reason: Int, status: Int = 0): Boolean = (reason == EXIT_SELF && status != 0) || reason in setOf(
         LOW_MEMORY, CRASH, CRASH_NATIVE, ANR, INITIALIZATION_FAILURE, EXCESSIVE_RESOURCE_USAGE,
     )
 }
@@ -104,7 +104,7 @@ object StartupReport {
         if (exits.isEmpty()) out.append("No exit records (Android 11 or newer records them).\n")
         for (exit in exits) {
             out.append(time(exit.timestamp)).append("  ").append(exit.process).append(" pid ").append(exit.pid)
-                .append(": ").append(ExitReasons.name(exit.reason)).append(", status ").append(exit.status)
+                .append(": ").append(ExitReasons.name(exit.reason, exit.status)).append(", status ").append(exit.status)
             if (exit.pssKb > 0 || exit.rssKb > 0) out.append(", pss ").append(exit.pssKb / 1024).append(" MiB, rss ")
                 .append(exit.rssKb / 1024).append(" MiB")
             exit.description?.takeIf { it.isNotBlank() }?.let { out.append(" (").append(line(it)).append(')') }
@@ -116,7 +116,7 @@ object StartupReport {
         for (session in sessions) {
             val exit = exits.firstOrNull { it.pid == session.pid && it.timestamp >= session.startedAt }
             out.append("Session pid ").append(session.pid).append(" started ").append(time(session.startedAt))
-            out.append(if (exit == null) "" else ", ended: ${ExitReasons.name(exit.reason)}").append('\n')
+            out.append(if (exit == null) "" else ", ended: ${ExitReasons.name(exit.reason, exit.status)}").append('\n')
             for (stage in session.stages) {
                 out.append("  +").append(seconds(stage.time - session.startedAt)).append(" s  ").append(stage.name)
                     .append('\n')
@@ -139,7 +139,7 @@ object StartupReport {
     /** One line of the summary shown before the report: what ended, how, at which stage. */
     fun summary(exit: ExitRecord, sessions: List<StageSession>): String {
         val stage = sessions.firstOrNull { it.pid == exit.pid }?.stages?.lastOrNull()?.name
-        return ExitReasons.name(exit.reason) + (if (stage == null) "" else ", last stage: $stage")
+        return ExitReasons.name(exit.reason, exit.status) + (if (stage == null) "" else ", last stage: $stage")
     }
 
     /** The structural part of a Java failure: classes and frames, never messages or paths. */

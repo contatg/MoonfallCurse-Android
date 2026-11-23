@@ -116,7 +116,13 @@ using Renderer3ds::kMaximumNriPipelineCacheBytes;
 // fast/renderer3ds/title_shader_preparation.h). Empty without a cache
 // directory or with an invalid namespace: the cache then stays in memory.
 std::filesystem::path VulkanPipelineCachePath(bool nri = false) {
-    const auto directory = VulkanShaderCacheDirectory();
+    auto directory = VulkanShaderCacheDirectory();
+#if defined(__ANDROID__)
+    // Preserve Forge's stock cache when switching drivers. Existing header
+    // checks still reject blobs from incompatible Mesa builds.
+    if (!directory.empty() && std::getenv("TRIAEVUM_ANDROID_TURNIP_LOADER"))
+        directory /= "turnip";
+#endif
     const auto filename = Renderer3ds::TitlePipelineCacheFilename(
         nri ? Renderer3ds::kNriPipelineCacheFilename : "pipeline_cache.bin",
         Renderer3ds::InstalledTitleShaderPreparation().PipelineCacheNamespace);

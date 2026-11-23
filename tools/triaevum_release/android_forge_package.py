@@ -183,6 +183,14 @@ CORPUS_ROLES = ("portable_shader_corpus", "portable_pipeline_recipes", "portable
 CORPUS_FILES = ("expanded-union.o3ps", "runtime-pipelines.json", "qualification.json")
 
 
+def omit_portable_shader_corpus(catalog: dict, records: list[dict]) -> list[dict]:
+    """Leave required title/Forge data intact and use the runtime's on-device shader cache."""
+    for title in catalog["titles"]:
+        title.pop("shader_preparation", None)
+        title.pop("device_pipeline_preparation", None)
+    return [record for record in records if record.get("role") not in CORPUS_ROLES]
+
+
 def substitute_shader_corpus(result: dict, data: dict, corpus: Path, source_root: Path) -> dict:
     """The Android corpus in place of the reference's (a per-platform pack: Android's
     preset and capability set differ from the desktop's). The corpus directory holds
@@ -239,7 +247,7 @@ def add_mm3d_usa_revision(recipes: dict, catalog: dict, variant: dict) -> None:
 
 def create_package(reference_root: Path, native_stage: Path, output: Path, *, source_commit: str,
                    title: str | None = None, shader_corpus: Path | None = None,
-                   source_root: Path | None = None) -> dict:
+                   source_root: Path | None = None, compile_shaders_on_device: bool = False) -> dict:
     if len(source_commit) != 40 or any(c not in "0123456789abcdef" for c in source_commit):
         raise ValueError("Platform source commit must be a full Git commit ID")
     libraries = native_stage / "arm64-v8a"
@@ -283,6 +291,11 @@ def create_package(reference_root: Path, native_stage: Path, output: Path, *, so
                 title[key].update(compiler=runtime_record, dependencies=[])
         if "device_pipeline_preparation" in title:
             title["device_pipeline_preparation"].update(helper=runtime_record, dependencies=[])
+    if compile_shaders_on_device and shader_corpus is not None:
+        raise ValueError("Choose either on-device shader compilation or a bundled Android shader corpus")
+    if compile_shaders_on_device:
+        kept = omit_portable_shader_corpus(result, [record for record, _ in data.values()])
+        data = {record["path"]: data[record["path"]] for record in kept}
     if shader_corpus is not None:
         if source_root is None:
             raise ValueError("--shader-corpus needs --source-root (the package's sources, for its qualification)")
@@ -390,7 +403,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--title", choices=TITLES,
                         help="the product of the APK; the reference release must be that title's")
-    parser.add_argument("--shader-corpus", type=Path,
+    shaders = parser.add_mutually_exclusive_group()
+    shaders.add_argument("--compile-shaders-on-device", action="store_true",
+                         help="omit the portable shader corpus and prepare missing shaders on the device")
+    shaders.add_argument("--shader-corpus", type=Path,
                         help="Android shader corpus directory (expanded-union.o3ps, runtime-pipelines.json, "
                              "qualification.json) replacing the reference package's desktop corpus")
     parser.add_argument("--source-root", type=Path,
@@ -403,7 +419,8 @@ def main():
         parser.error(f"--sign needs ${release_signature.KEY_VARIABLE}")
     inventory = create_package(args.reference_package, args.native_stage, args.output,
                                source_commit=args.source_commit, title=args.title,
-                               shader_corpus=args.shader_corpus, source_root=args.source_root)
+                               shader_corpus=args.shader_corpus, source_root=args.source_root,
+                               compile_shaders_on_device=args.compile_shaders_on_device)
     print(f"{args.output / ASSET_ROOT}: {len(inventory['files'])} data files")
     if args.sign:
         print(sign_android_package(args.output / ASSET_ROOT, Path(key)))

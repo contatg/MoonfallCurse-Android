@@ -138,7 +138,7 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
                     // frame start).
                     Extension::IsNativeTopScreenTarget({source->Key.Width, source->Key.Height}) &&
                         Extension::NativeTopScreenAtPresentedDensity(
-                            NativeTopScreenOutputExtent()),
+                            NativeTopScreenOutputExtent(), mNativeMobileProfile),
                 }, &transferPlanError);
             if (!transferPlan.has_value()) {
                 throw std::runtime_error(
@@ -844,7 +844,8 @@ bool GfxRenderingAPIVulkan::ExecuteNativePicaDisplayGraph(
                 plannedUpscalerInputWidth, plannedUpscalerInputHeight);
         const auto promotedExtent = outputResolutionUi && copySource != nullptr
             ? Extension::ResolveNativePicaRenderExtent(
-                {copySource->Key.Width, copySource->Key.Height}, NativeTopScreenOutputExtent(), 1.0F)
+                {copySource->Key.Width, copySource->Key.Height}, NativeTopScreenOutputExtent(),
+                1.0F, mNativeMobileProfile)
             : Extension::RenderExtent{plannedUpscalerContract.Output.Width, plannedUpscalerContract.Output.Height};
         const uint32_t plannedUpscalerWidth = promotedExtent.Width;
         const uint32_t plannedUpscalerHeight = promotedExtent.Height;

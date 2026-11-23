@@ -24,7 +24,7 @@ class Oot3dVulkanGpuProfiler {
     static constexpr uint32_t kFramesInFlight = 2;
 
     void Initialize(VkPhysicalDevice physicalDevice, VkDevice device,
-                    uint32_t queueFamily, bool enabled);
+                    uint32_t queueFamily, bool enabled, bool frameOnly = false);
     void Shutdown();
 
     std::optional<Oot3dVulkanGpuTimings> BeginFrame(
@@ -90,6 +90,7 @@ class Oot3dVulkanGpuProfiler {
     VkQueryPool mPool = VK_NULL_HANDLE;
     double mNanosecondsPerTick = 0.0;
     std::array<FrameState, kFramesInFlight> mFrames{};
+    bool mFrameOnly = false;
     bool mGapTrace = false;
     uint64_t mGapTraceLastEnd = 0;
     double mGapTraceBusy = 0.0;

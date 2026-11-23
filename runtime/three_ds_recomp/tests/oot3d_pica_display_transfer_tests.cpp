@@ -94,6 +94,40 @@ TEST(Oot3dPicaDisplayTransfer, CopiesASourceAtPresentedDensity) {
     EXPECT_TRUE(reduced->SamplingFitsSource());
 }
 
+TEST(Oot3dPicaDisplayTransfer, MobileNativeScreenRetainsCropAndAspect) {
+    using namespace Fast::Extension;
+    const auto wide = LimitNativeTopScreenResolution({1560U, 720U});
+    EXPECT_EQ(wide.Width, 400U);
+    EXPECT_EQ(wide.Height, 185U);
+
+    const auto standard = LimitNativeTopScreenResolution({1200U, 720U});
+    EXPECT_EQ(standard.Width, 400U);
+    EXPECT_EQ(standard.Height, 240U);
+
+    const auto small = LimitNativeTopScreenResolution({320U, 192U});
+    EXPECT_EQ(small.Width, 320U);
+    EXPECT_EQ(small.Height, 192U);
+
+    // MM3D reserves 512 columns for the top screen and scans out 480 of them.
+    const RenderExtent guest{512U, 400U};
+    for (const auto lcd : {wide, standard}) {
+        const auto target = ResolveNativePicaRenderExtent(guest, lcd, 1.0F, true);
+        const auto plan = BuildPicaDisplayTransferPlan({
+            guest.Width, guest.Height, 240U, 400U, target.Width, target.Height,
+            0x01001000U, NativeTopScreenAtPresentedDensity(lcd, true)});
+        ASSERT_TRUE(plan.has_value());
+        EXPECT_EQ(plan->DestinationWidth, lcd.Height);
+        EXPECT_EQ(plan->DestinationHeight, lcd.Width);
+        EXPECT_EQ(plan->HorizontalSamples, 1U);
+        EXPECT_TRUE(plan->SamplingFitsSource());
+        EXPECT_FLOAT_EQ(NativeTopScreenStorageSamplingX(guest, lcd, true), 0.5F);
+    }
+
+    const auto regular = ResolveNativePicaRenderExtent(guest, standard, 1.0F);
+    EXPECT_EQ(regular.Width, 512U);
+    EXPECT_FLOAT_EQ(NativeTopScreenStorageSamplingX(guest, standard), 1.0F);
+}
+
 TEST(Oot3dPicaDisplayTransfer, RejectsSamplingPastSource) {
     std::string error;
     const auto plan = Fast::Extension::BuildPicaDisplayTransferPlan(

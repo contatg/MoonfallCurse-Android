@@ -6,6 +6,7 @@
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
 #include "fast/renderer3ds/pica_framebuffer_encode_gpu.h"
 #include "fast/renderer3ds/pica_texture_copy_plan.h"
+#include "fast/renderer3ds/pica_texture_copy_derive_gpu.h"
 #include "fast/renderer/spirv_cache.h"
 #include <algorithm>
 #include <chrono>
@@ -72,6 +73,26 @@ uint64_t GfxRenderingAPIVulkan::GpuTextureCopyReferenceIdentity(
     return hash == 0U ? 1U : hash;
 }
 
+const GfxRenderingAPIVulkan::GpuTextureCopySurface*
+GfxRenderingAPIVulkan::FindGpuTextureCopyProducer(
+    uint64_t renderTargetNamespace,
+    const Renderer3ds::PicaTextureCopyReference& reference) const {
+    auto producer = mGpuTextureCopyProducers.find(
+        {renderTargetNamespace, reference.CompletionId,
+         reference.AfterDrawSubmissionId});
+    if (producer == mGpuTextureCopyProducers.end() &&
+        mCanonicalRenderTargetNamespace.has_value() &&
+        *mCanonicalRenderTargetNamespace != renderTargetNamespace) {
+        // A superseded frame may have executed only in the canonical namespace.
+        producer = mGpuTextureCopyProducers.find(
+            {*mCanonicalRenderTargetNamespace, reference.CompletionId,
+             reference.AfterDrawSubmissionId});
+    }
+    if (producer == mGpuTextureCopyProducers.end()) return nullptr;
+    const auto surface = mGpuTextureCopySurfaces.find(producer->second);
+    return surface == mGpuTextureCopySurfaces.end() ? nullptr : &surface->second;
+}
+
 bool GfxRenderingAPIVulkan::BuildGpuTextureCopyDerivation(
     const GfxNativePicaTextureView& texture, uint64_t renderTargetNamespace,
     GpuTextureCopyDerivation& derivation, GpuTextureCopyFallback* fallback,
@@ -115,32 +136,12 @@ bool GfxRenderingAPIVulkan::BuildGpuTextureCopyDerivation(
             return fail(GpuTextureCopyFallback::Layout,
                         "a producer reference lies outside the sampled texture");
         }
-        auto producer = mGpuTextureCopyProducers.find(
-            {renderTargetNamespace, reference.CompletionId,
-             reference.AfterDrawSubmissionId});
-        if (producer == mGpuTextureCopyProducers.end() &&
-            mCanonicalRenderTargetNamespace.has_value() &&
-            *mCanonicalRenderTargetNamespace != renderTargetNamespace) {
-            // One guest operation that only the canonical namespace executed:
-            // a superseded frame runs its native work but is never presented,
-            // and a later presented frame (a feedback history) still samples
-            // its result. Only the canonical version may be imported; a
-            // canonical read never takes a presentation version.
-            producer = mGpuTextureCopyProducers.find(
-                {*mCanonicalRenderTargetNamespace, reference.CompletionId,
-                 reference.AfterDrawSubmissionId});
-        }
-        if (producer == mGpuTextureCopyProducers.end()) {
+        const auto* surface = FindGpuTextureCopyProducer(renderTargetNamespace, reference);
+        if (surface == nullptr) {
             return fail(GpuTextureCopyFallback::UnknownProducer,
-                        "the producer version is not registered in this "
-                        "namespace");
+                        "the producer version is not registered in this namespace");
         }
-        const auto surface = mGpuTextureCopySurfaces.find(producer->second);
-        if (surface == mGpuTextureCopySurfaces.end()) {
-            return fail(GpuTextureCopyFallback::UnknownProducer,
-                        "the producer surface is gone");
-        }
-        const auto& candidate = surface->second;
+        const auto& candidate = *surface;
         if (candidate.Image == VK_NULL_HANDLE) {
             return fail(GpuTextureCopyFallback::UncapturedProducer,
                         "the producer has no captured GPU copy");
@@ -299,16 +300,16 @@ bool GfxRenderingAPIVulkan::BuildGpuTextureCopyDerivation(
 }
 
 bool GfxRenderingAPIVulkan::RecordGpuTextureCopyBaseFill(
-    const GpuTextureCopyDerivation& derivation, VkImage baseImage,
+    const GpuTextureCopyDerivation& derivation, const TextureRecord& base,
     TextureRecord& record) {
-    if (baseImage == VK_NULL_HANDLE || record.Image == VK_NULL_HANDLE ||
+    if (base.Image == VK_NULL_HANDLE || record.Image == VK_NULL_HANDLE ||
         derivation.DeclaredWidth == 0U || derivation.DeclaredHeight == 0U) {
         return false;
     }
     Extension::NriPicaDisplayCopyRegionDesc desc;
     desc.FrameIndex = mCurrentFrame;
     desc.FrameId = mFrameCounter;
-    desc.SourceImage = baseImage;
+    desc.SourceImage = base.Image;
     desc.SourceFormat = VK_FORMAT_R8G8B8A8_UNORM;
     // The base is the decoded native layout, so its own extent is the space the
     // expansion samples from.
@@ -332,7 +333,7 @@ bool GfxRenderingAPIVulkan::RecordGpuTextureCopyBaseFill(
     // RGBA8 pass-through: the base is already the decoded native pixel, so no
     // native format semantics may be applied a second time.
     desc.NativeFormat = 0U;
-    if (!mNriPicaTextureCopyDerivePass.ExecuteRegion(desc)) {
+    if (!RecordCopyRegion(desc, base.View, record.View)) {
         throw std::runtime_error(
             "raw PICA copy base fill dispatch was refused");
     }
@@ -392,7 +393,7 @@ bool GfxRenderingAPIVulkan::RecordGpuTextureCopyDerivation(
             desc.SourceNativeWidth = surface.SourceWidth;
             desc.SourceNativeHeight = surface.SourceHeight;
             desc.NativeFormat = surface.SourceFormat;
-            if (!mNriPicaTextureCopyDerivePass.ExecuteRegion(desc)) {
+            if (!RecordCopyRegion(desc, surface.ImageView, record.View)) {
                 throw std::runtime_error(
                     "raw PICA copy derivation dispatch was refused");
             }
@@ -633,7 +634,7 @@ bool GfxRenderingAPIVulkan::ReadGpuTextureCopyBytes(
     if (found == mGpuTextureCopySurfaces.end()) return false;
     auto& surface = found->second;
     if (surface.MaterializedNativeBytes.empty()) {
-        // This is an explicit CPU visibility boundary, never sampler work.
+        // A guest read or compatibility sampler needs the actual bytes.
         // Execute the recorded producer first; read the native capture, not a
         // mutable attachment or the optional-effects composition.
         FlushGpuTextureCopyPrefix();
@@ -669,6 +670,31 @@ bool GfxRenderingAPIVulkan::ReadGpuTextureCopyBytes(
     return true;
 }
 
+
+std::vector<uint8_t> GfxRenderingAPIVulkan::MaterializeGpuTextureCopySampler(
+    const GfxNativePicaTextureView& texture, uint64_t renderTargetNamespace) {
+    // The snapshot already contains CPU-owned bytes. Overlay only the ranges
+    // held by the immutable producer version that each reference names.
+    std::vector<uint8_t> bytes(texture.NativeBytes.begin(), texture.NativeBytes.end());
+    for (const auto& reference : texture.CopyReferences) {
+        if (reference.ByteCount == 0U ||
+            reference.PhysicalAddress < texture.PhysicalAddress ||
+            uint64_t{reference.PhysicalAddress - texture.PhysicalAddress} +
+                    reference.ByteCount > bytes.size()) {
+            throw std::runtime_error("PICA copy reference exceeds the native texture snapshot");
+        }
+        const auto* producer = FindGpuTextureCopyProducer(renderTargetNamespace, reference);
+        if (producer == nullptr || producer->Image == VK_NULL_HANDLE) {
+            throw std::runtime_error("PICA compatibility copy producer has no captured image");
+        }
+        auto output = std::span<uint8_t>(bytes).subspan(
+            reference.PhysicalAddress - texture.PhysicalAddress, reference.ByteCount);
+        if (!ReadGpuTextureCopyBytes(producer->Identity, reference.PhysicalAddress, output)) {
+            throw std::runtime_error("PICA compatibility copy could not materialize the referenced bytes");
+        }
+    }
+    return bytes;
+}
 
 void GfxRenderingAPIVulkan::DestroyRawCopyEncodeResources() {
     if (mDevice != VK_NULL_HANDLE) {
@@ -981,21 +1007,273 @@ bool GfxRenderingAPIVulkan::EnsureRawCopySampler(std::string* error) {
     return true;
 }
 
+void GfxRenderingAPIVulkan::InitializeVulkanCopyDerivation() {
+    try {
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &count, families.data());
+        if (mGraphicsQueueFamily >= count ||
+            !(families[mGraphicsQueueFamily].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+            throw std::runtime_error("graphics queue does not support compute");
+        }
+        if (!EnsureRawCopySampler(nullptr)) {
+            throw std::runtime_error("PICA copy sampler unavailable");
+        }
+
+        constexpr VkDescriptorSetLayoutBinding bindings[] = {
+            {0U, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1U, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            {1U, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1U, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            {2U, VK_DESCRIPTOR_TYPE_SAMPLER, 1U, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        };
+        VkDescriptorSetLayoutCreateInfo descriptor{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        descriptor.bindingCount = std::size(bindings);
+        descriptor.pBindings = bindings;
+        RequireCopyVk(vkCreateDescriptorSetLayout(mDevice, &descriptor, nullptr,
+                                                  &mVulkanCopyDeriveDescriptorLayout),
+                      "create Vulkan PICA copy descriptors");
+        const VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0U, 64U};
+        VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layout.setLayoutCount = 1U;
+        layout.pSetLayouts = &mVulkanCopyDeriveDescriptorLayout;
+        layout.pushConstantRangeCount = 1U;
+        layout.pPushConstantRanges = &range;
+        RequireCopyVk(vkCreatePipelineLayout(mDevice, &layout, nullptr, &mVulkanCopyDerivePipelineLayout),
+                      "create Vulkan PICA copy layout");
+
+        const std::string source(Renderer3ds::PicaTextureCopyDeriveComputeSource);
+        const auto spirv = mCompiledShaderCache.Resolve(source, Renderer::SpirvStage::Compute, [&] {
+            return Renderer::CompileShadercSpirv(source, Renderer::SpirvStage::Compute,
+                                                 "oot3d_pica_texture_copy_derive.comp");
+        });
+        const VkShaderModule module = CreateShaderModuleFromSpirv(spirv);
+        if (module == VK_NULL_HANDLE) {
+            throw std::runtime_error("Vulkan PICA copy shader module unavailable");
+        }
+        VkComputePipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        pipeline.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipeline.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        pipeline.stage.module = module;
+        pipeline.stage.pName = "main";
+        pipeline.layout = mVulkanCopyDerivePipelineLayout;
+        const VkResult status = vkCreateComputePipelines(mDevice, mPipelineCache, 1U, &pipeline,
+                                                         nullptr, &mVulkanCopyDerivePipeline);
+        vkDestroyShaderModule(mDevice, module, nullptr);
+        RequireCopyVk(status, "create Vulkan PICA copy pipeline");
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "TRIAEVUM_VULKAN_PICA_COPY_UNAVAILABLE %s\n", error.what());
+        DestroyVulkanCopyDerivation();
+    }
+}
+
+void GfxRenderingAPIVulkan::DestroyVulkanCopyDerivation() {
+    vkDestroyPipeline(mDevice, mVulkanCopyDerivePipeline, nullptr);
+    vkDestroyPipelineLayout(mDevice, mVulkanCopyDerivePipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(mDevice, mVulkanCopyDeriveDescriptorLayout, nullptr);
+    mVulkanCopyDerivePipeline = VK_NULL_HANDLE;
+    mVulkanCopyDerivePipelineLayout = VK_NULL_HANDLE;
+    mVulkanCopyDeriveDescriptorLayout = VK_NULL_HANDLE;
+}
+
+bool GfxRenderingAPIVulkan::RecordCopyRegion(
+    const Extension::NriPicaDisplayCopyRegionDesc& desc,
+    VkImageView sourceView, VkImageView destinationView) {
+    if (mNriPicaTextureCopyDerivePass.Available()) {
+        return mNriPicaTextureCopyDerivePass.ExecuteRegion(desc);
+    }
+    if (mVulkanCopyDerivePipeline == VK_NULL_HANDLE ||
+        sourceView == VK_NULL_HANDLE || destinationView == VK_NULL_HANDLE ||
+        !Extension::ValidateNriPicaDisplayCopyRegionDesc(desc)) {
+        return false;
+    }
+    EndNativePicaRenderPass();
+    const auto command = mCommandBuffers[mCurrentFrame];
+    if (mRenderPassActive) {
+        vkCmdEndRenderPass(command);
+        mRenderPassActive = false;
+        mOverlayRenderPassActive = false;
+    }
+
+    VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocation.descriptorPool = mFrameResources[mCurrentFrame].DescriptorPool;
+    allocation.descriptorSetCount = 1U;
+    allocation.pSetLayouts = &mVulkanCopyDeriveDescriptorLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    RequireCopyVk(vkAllocateDescriptorSets(mDevice, &allocation, &set), "allocate Vulkan PICA copy descriptors");
+    const VkDescriptorImageInfo images[] = {
+        {VK_NULL_HANDLE, sourceView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE, destinationView, VK_IMAGE_LAYOUT_GENERAL},
+        {mRawCopyEncodeSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED},
+    };
+    constexpr VkDescriptorType types[] = {
+        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER,
+    };
+    std::array<VkWriteDescriptorSet, std::size(types)> writes{};
+    for (uint32_t i = 0; i < writes.size(); ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1U;
+        writes[i].descriptorType = types[i];
+        writes[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(mDevice, writes.size(), writes.data(), 0U, nullptr);
+
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = desc.DestinationImage;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0U, 1U, 0U, 1U};
+    barrier.oldLayout = desc.DestinationInitialized
+        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcAccessMask = desc.DestinationInitialized ? VK_ACCESS_SHADER_WRITE_BIT : 0U;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+
+    // Matches the four vectors in PicaTextureCopyDeriveComputeSource.
+    const std::array<uint32_t, 16> push{
+        desc.DestinationX, desc.DestinationY, desc.Width, desc.Height,
+        static_cast<uint32_t>(desc.NativeDeltaX), static_cast<uint32_t>(desc.NativeDeltaY),
+        desc.SourceAttachmentRows ? 1U : 0U, 0U,
+        desc.DensityX, desc.DensityY, desc.SourceNativeWidth, desc.SourceNativeHeight,
+        desc.SourceWidth, desc.SourceHeight, desc.NativeFormat, 0U,
+    };
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, mVulkanCopyDerivePipeline);
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, mVulkanCopyDerivePipelineLayout,
+                            0U, 1U, &set, 0U, nullptr);
+    vkCmdPushConstants(command, mVulkanCopyDerivePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0U, sizeof(push), push.data());
+    vkCmdDispatch(command, 1U + (desc.Width - 1U) / 8U, 1U + (desc.Height - 1U) / 8U, 1U);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0U, 0U, nullptr, 0U, nullptr, 1U, &barrier);
+    return true;
+}
+
+void GfxRenderingAPIVulkan::CaptureGpuTextureCopyVulkan(
+    const GpuTextureCopySourceImport& source, GpuTextureCopySurface& surface) {
+    VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    image.imageType = VK_IMAGE_TYPE_2D;
+    image.format = source.Format;
+    image.extent = {source.Width, source.Height, 1U};
+    image.mipLevels = 1U;
+    image.arrayLayers = 1U;
+    image.samples = VK_SAMPLE_COUNT_1_BIT;
+    image.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    const auto start = std::chrono::steady_clock::now();
+    const auto key = GpuCopyDerivedImageKey(source.Width, source.Height, /*nriOwned=*/false);
+    PooledGpuCopyImage pooled;
+    if (AcquireGpuCopyImage(key, pooled)) {
+        surface.Image = pooled.Image;
+        surface.ImageMemory = pooled.Memory;
+        surface.ImageView = pooled.View;
+    } else {
+        RequireCopyVk(vkCreateImage(mDevice, &image, nullptr, &surface.Image),
+                      "create Vulkan PICA copy capture");
+        try {
+            VkMemoryRequirements requirements{};
+            vkGetImageMemoryRequirements(mDevice, surface.Image, &requirements);
+            VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocation.allocationSize = requirements.size;
+            allocation.memoryTypeIndex = FindMemoryType(
+                requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            RequireCopyVk(vkAllocateMemory(mDevice, &allocation, nullptr, &surface.ImageMemory),
+                          "allocate Vulkan PICA copy capture");
+            RequireCopyVk(vkBindImageMemory(mDevice, surface.Image, surface.ImageMemory, 0),
+                          "bind Vulkan PICA copy capture");
+            VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            view.image = surface.Image;
+            view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view.format = source.Format;
+            view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0U, 1U, 0U, 1U};
+            RequireCopyVk(vkCreateImageView(mDevice, &view, nullptr, &surface.ImageView),
+                          "create Vulkan PICA copy view");
+        } catch (...) {
+            vkDestroyImage(mDevice, surface.Image, nullptr);
+            vkFreeMemory(mDevice, surface.ImageMemory, nullptr);
+            throw;
+        }
+    }
+    surface.ImagePoolable = true;
+    mGpuTextureCopySamplerCost.PoolCreateSeconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    const auto command = mCommandBuffers[mCurrentFrame];
+    std::array<VkImageMemoryBarrier, 2> barriers{};
+    for (auto& barrier : barriers) {
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0U, 1U, 0U, 1U};
+    }
+    const VkImageLayout sourceLayout = source.ShaderRead
+        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barriers[0].image = source.Image;
+    barriers[0].oldLayout = sourceLayout;
+    barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barriers[0].srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barriers[1].image = surface.Image;
+    barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, barriers.size(), barriers.data());
+
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0U, 0U, 1U};
+    region.dstSubresource = region.srcSubresource;
+    region.extent = image.extent;
+    vkCmdCopyImage(command, source.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   surface.Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barriers[0].newLayout = sourceLayout;
+    barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barriers[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                         nullptr, barriers.size(), barriers.data());
+}
+
 bool GfxRenderingAPIVulkan::CaptureGpuTextureCopySource(
     const GpuTextureCopySourceImport& source, GpuTextureCopySurface& surface) {
-    // An NRI pass performs the capture: NRI owns the destination resource,
-    // declares the transition of both imports and leaves the destination
-    // shader-readable for whoever samples it. There is no readback, no decode
-    // and no re-upload anywhere in this path.
+    // Both capture paths record an immutable GPU image at this boundary and
+    // leave it shader-readable. Readback happens only when bytes are needed.
     surface.Image = VK_NULL_HANDLE;
     surface.ImageWidth = 0U;
     surface.ImageHeight = 0U;
     if (source.Image == VK_NULL_HANDLE || source.Width == 0U ||
-        source.Height == 0U || !mNriPicaTextureCopyCapturePass.Available()) {
+        source.Height == 0U || source.Format != VK_FORMAT_R8G8B8A8_UNORM) {
         return false;
     }
     const uint32_t width = source.Width;
     const uint32_t height = source.Height;
+    surface.ImageWidth = width;
+    surface.ImageHeight = height;
+    surface.Encoding = source.Encoding;
+    surface.SceneEffectsResolved = source.SceneEffectsResolved;
+    surface.Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!mNriPicaTextureCopyCapturePass.Available()) {
+        CaptureGpuTextureCopyVulkan(source, surface);
+        return true;
+    }
     Extension::NriOwnedTexture2D captured;
     // The capture pass writes every texel of the destination (identity plan,
     // destination seeded Undefined), so a pooled image of the same key is
@@ -1035,11 +1313,6 @@ bool GfxRenderingAPIVulkan::CaptureGpuTextureCopySource(
     surface.Image = captured.Image;
     surface.ImageView = captured.SampledView;
     surface.ImagePoolable = captured.SampledView != VK_NULL_HANDLE;
-    surface.ImageWidth = width;
-    surface.ImageHeight = height;
-    surface.Encoding = source.Encoding;
-    surface.SceneEffectsResolved = source.SceneEffectsResolved;
-    surface.Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     return true;
 }
 
@@ -1068,13 +1341,15 @@ void GfxRenderingAPIVulkan::MaterializeRestoredGpuTextureCopyProducers() {
             throw;
         }
         surface.Image = staged.Image;
+        surface.ImageMemory = staged.Memory;
+        surface.ImageView = staged.View;
         surface.ImagePoolable = false;  // restored image: not created by the capture path
         surface.Layout = staged.ImageLayout;
-        // The staged record only carried the upload; the register owns the
-        // image now, so its sampler and view go away.
+        // The register owns the image and view now. The staged sampler is no longer needed.
         staged.Image = VK_NULL_HANDLE;
         staged.NriImage = VK_NULL_HANDLE;
         staged.Memory = VK_NULL_HANDLE;
+        staged.View = VK_NULL_HANDLE;
         DestroyTexture(staged);
     }
 }
@@ -1151,7 +1426,21 @@ void GfxRenderingAPIVulkan::DestroyGpuTextureCopySurface(uint64_t identity, bool
         }
     };
     if (found->second.Image != VK_NULL_HANDLE) {
-        retireCapture(found->second.Image, found->second.ImageView);
+        if (found->second.ImageMemory != VK_NULL_HANDLE) {
+            const auto& capture = found->second;
+            mNriPicaTextureCopyCapturePass.ForgetTexture(capture.Image);
+            mNriInterop.ForgetTexture(capture.Image);
+            if (toPool && capture.ImagePoolable) {
+                ReleaseGpuCopyImage(GpuCopyDerivedImageKey(capture.ImageWidth, capture.ImageHeight, false),
+                                    {capture.Image, capture.ImageView, capture.ImageMemory});
+            } else {
+                vkDestroyImageView(mDevice, capture.ImageView, nullptr);
+                vkDestroyImage(mDevice, capture.Image, nullptr);
+                vkFreeMemory(mDevice, capture.ImageMemory, nullptr);
+            }
+        } else {
+            retireCapture(found->second.Image, found->second.ImageView);
+        }
     }
     if (found->second.NativeImage != VK_NULL_HANDLE &&
         found->second.NativeImage != found->second.Image) {
@@ -1801,10 +2090,7 @@ bool GfxRenderingAPIVulkan::SubmitNativePicaTextureCopy(
                 if (!outputLeft) { output += outputGap; outputLeft = outputWidth; }
             }
         }
-        // The immutable capture of the whole source is taken whenever the NRI
-        // capture pass is available; which subranges a sampler may use is decided
-        // per consumer from the bytes that consumer still owns.
-        const bool captureAvailable =
+        const bool composeCopy =
             mNriPicaTextureCopyCapturePass.Available();
         GpuTextureCopySurface surface;
         surface.RenderTargetNamespace = transfer.RenderTargetNamespace;
@@ -1824,7 +2110,6 @@ bool GfxRenderingAPIVulkan::SubmitNativePicaTextureCopy(
         // Whether the copy may be sampled as an image is decided per consumer
         // from the subranges it still owns, through the same shared planner; the
         // capture itself always happens so a later partial consumer can use it.
-        const bool sampleable = captureAvailable;
         EndNativePicaRenderPass();
         if (mRenderPassActive) {
             vkCmdEndRenderPass(mCommandBuffers[mCurrentFrame]);
@@ -1837,7 +2122,7 @@ bool GfxRenderingAPIVulkan::SubmitNativePicaTextureCopy(
         // applies here. A composer that cannot produce a valid source fails the
         // copy, so an enabled effect can never silently sample the base target.
         GpuTextureCopySourceImport copySource;
-        if (sampleable) {
+        if (composeCopy) {
             std::string composeError;
             if (!ComposeNativePicaSceneForCopy(
                     *source, transfer.AfterDrawSubmissionId, copySource,
@@ -1855,23 +2140,12 @@ bool GfxRenderingAPIVulkan::SubmitNativePicaTextureCopy(
                     "internal extent and RGBA8 domain");
             }
         } else {
-            // The byte walk is not a whole-surface translation, so this copy is
-            // never sampled from the GPU and no scene source is declared: the
-            // guest writeback below stays native truth. Reported, never silent.
-            static bool unsampleableReported = false;
-            if (!unsampleableReported) {
-                unsampleableReported = true;
-                std::fprintf(stderr,
-                             "TRIAEVUM_GPU_COPY_UNSAMPLEABLE bytes=%u spans=%llu "
-                             "native=%ux%u format=%u\n",
-                             transfer.TextureCopyBytes,
-                             static_cast<unsigned long long>(spans.size()),
-                             source->Key.Width, source->Key.Height,
-                             source->Key.ColorFormat);
-            }
+            copySource.Image = source->ColorImage;
+            copySource.Width = source->Width;
+            copySource.Height = source->Height;
         }
         const VkCommandBuffer command = mCommandBuffers[mCurrentFrame];
-        if (sampleable && !CaptureGpuTextureCopySource(copySource, surface)) {
+        if (!CaptureGpuTextureCopySource(copySource, surface)) {
             surface.Image = VK_NULL_HANDLE;
             static bool captureReported = false;
             if (!captureReported) {

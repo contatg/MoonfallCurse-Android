@@ -16,6 +16,7 @@ namespace {
 std::mutex installerPageMutex;
 std::string installerPage;
 std::atomic<bool> pauseRequested{false};
+std::atomic<int> gameExitStatus{0};
 
 // org.triaevum.android.diagnostics.StartupDiagnostics.nativeStage(String):
 // resolved once on SDL's main thread (a Java thread, so the app's class
@@ -62,7 +63,16 @@ bool RequestAndroidInstallerPage(std::string_view page, std::string* error) {
     return true;
 }
 
+void RecordAndroidGameExit(int status) noexcept {
+    gameExitStatus.store(status, std::memory_order_release);
+    Fast::StartupCheckpointf("native_game_error status=%d", status);
+}
+
 extern "C" {
+
+JNIEXPORT jint JNICALL Java_org_triaevum_android_NativeHostBridge_gameExitStatus(JNIEnv*, jobject) {
+    return gameExitStatus.load(std::memory_order_acquire);
+}
 
 // org.triaevum.android.NativeHostBridge.takeInstallerPage(): the page the
 // menu asked for, once, or null. Called by the activity as the game ends.

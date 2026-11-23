@@ -55,6 +55,10 @@ public final class TriAevumActivity extends SDLActivity {
 
     @Override public void loadLibraries() {
         StartupDiagnostics.stage(this, "libraries_loading");
+        if (TurnipDriver.imported(this)) {
+            boolean selected = TurnipDriver.select(this);
+            StartupDiagnostics.stage(this, selected ? "turnip_selected" : "turnip_unavailable_using_system");
+        }
         try {
             super.loadLibraries();
         } catch (RuntimeException | UnsatisfiedLinkError error) {
@@ -153,9 +157,11 @@ public final class TriAevumActivity extends SDLActivity {
         // The native game runs once per process (title library, guest memory). When the game
         // ends, end the process too, so the next launch starts clean instead of reusing it.
         if (isFinishing()) {
-            StartupDiagnostics.stage(this, "exited");
-            openRequestedInstallerPage();
-            System.exit(0);
+            // SDL finishes the Activity even when SDL_main returned an error.
+            int status = mBrokenLibraries ? 0 : NativeHostBridge.INSTANCE.gameExitStatus();
+            StartupDiagnostics.stage(this, status == 0 ? "exited" : "exited_with_error " + status);
+            openRequestedInstallerPage(status);
+            System.exit(status);
         }
     }
 
@@ -164,11 +170,11 @@ public final class TriAevumActivity extends SDLActivity {
      * (its own process) then opens the page, while this process ends. The installer below this
      * activity is reused when it is still there.
      */
-    private void openRequestedInstallerPage() {
+    private void openRequestedInstallerPage(int status) {
         if (mBrokenLibraries) return;
         String page;
         try {
-            page = NativeHostBridge.INSTANCE.takeInstallerPage();
+            page = status != 0 ? "diagnostics" : NativeHostBridge.INSTANCE.takeInstallerPage();
         } catch (UnsatisfiedLinkError error) {
             return;
         }
